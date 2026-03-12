@@ -1,0 +1,9 @@
+{
+  "name": "claude-evolve",
+  "description": "Evolutionary code and artifact optimization powered by OpenEvolve. Evolve programs, prompts, algorithms, and any text artifact using MAP-Elites quality-diversity search with Claude as the intelligent mutation engine.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Claude Evolve",
+    "email": "noreply@example.com"
+  }
+}
