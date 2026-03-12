@@ -157,12 +157,14 @@ def init(artifact, evaluator, mode, config_path, max_iterations, target_score, s
             metrics = _run_async(ev.evaluate_content(initial_content))
             baseline_score = metrics.get("combined_score", 0.0)
 
-            # Update the seed artifact metrics in the database
+            # Update the seed artifact metrics in the database.
+            # The seed is already in db.artifacts; update its metrics in-place
+            # and re-add it so that best-tracking and feature grid are updated.
             db = sm.get_database()
             seed = db.get_best()
             if seed is not None:
                 seed.metrics = metrics
-                db._update_best(seed)
+                db.add(seed, iteration=0)
         except Exception as e:
             click.echo(f"Warning: Baseline evaluation failed: {e}", err=True)
             baseline_score = 0.0

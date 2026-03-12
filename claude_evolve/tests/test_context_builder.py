@@ -612,10 +612,21 @@ class TestContextBuilderSecurity(unittest.TestCase):
     def setUp(self):
         self.builder = ContextBuilder(PromptConfig())
 
-    def test_security_filter_redacts_long_tokens(self):
-        text = "auth_key = aaaaaaaabbbbbbbbccccccccdddddddd"
+    def test_security_filter_redacts_api_keys(self):
+        text = "key = sk-abc123def456ghi789jkl012mno345pqr678"
         filtered = self.builder._apply_security_filter(text)
-        self.assertIn("<REDACTED", filtered)
+        self.assertIn("<REDACTED_API_KEY>", filtered)
+
+    def test_security_filter_redacts_secret_key_assignments(self):
+        text = "api_key = aaaaaaaabbbbbbbbccccccccdddddddd"
+        filtered = self.builder._apply_security_filter(text)
+        self.assertIn("<REDACTED_SECRET>", filtered)
+
+    def test_security_filter_does_not_redact_legitimate_code(self):
+        # UUIDs, hashes, and long variable names should NOT be redacted
+        text = "uuid = aaaaaaaabbbbbbbbccccccccdddddddd"
+        filtered = self.builder._apply_security_filter(text)
+        self.assertNotIn("<REDACTED", filtered)
 
     def test_security_filter_redacts_password(self):
         text = "password= s3cr3t_pass"

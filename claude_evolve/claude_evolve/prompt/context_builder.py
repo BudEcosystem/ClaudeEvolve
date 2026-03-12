@@ -841,12 +841,13 @@ class ContextBuilder:
         ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
         filtered = ansi_escape.sub("", text)
 
-        # Redact common secret patterns
+        # Redact common secret patterns (targeted to avoid matching legitimate code
+        # like UUIDs, hashes, variable names, or hex strings in artifacts)
         secret_patterns = [
-            (r"[A-Za-z0-9]{32,}", "<REDACTED_TOKEN>"),
-            (r"sk-[A-Za-z0-9]{48}", "<REDACTED_API_KEY>"),
-            (r"password[=:]\s*[^\s]+", "password=<REDACTED>"),
-            (r"token[=:]\s*[^\s]+", "token=<REDACTED>"),
+            (r"sk-[A-Za-z0-9]{20,}", "<REDACTED_API_KEY>"),
+            (r"(?:api[_-]?key|secret[_-]?key|access[_-]?token)\s*[=:]\s*['\"]?[A-Za-z0-9_\-]{16,}['\"]?", "<REDACTED_SECRET>"),
+            (r"password\s*[=:]\s*[^\s]+", "password=<REDACTED>"),
+            (r"(?:bearer|token)\s+[A-Za-z0-9_\-.]{20,}", "token <REDACTED>"),
         ]
 
         for pattern, replacement in secret_patterns:
