@@ -56,31 +56,8 @@ Claude Evolve turns Claude Code into an evolutionary optimization engine. You pr
 
 Then Claude Evolve runs an evolution loop:
 
-```
-                     ┌─────────────────────────────────────────────┐
-                     │            Evolution Loop                   │
-                     │                                             │
-  /evolve ──────►    │  1. Diagnose stagnation level               │
-                     │  2. Select strategy (7 built-in strategies) │
-                     │  3. Load warm cache + cross-run memory      │
-                     │  4. Claude reads iteration context           │
-                     │     (parent, inspirations, metrics, guidance)│
-                     │  5. Claude researches the problem            │
-                     │     (web search, literature, code analysis)  │
-                     │  6. Claude generates improved candidate      │
-                     │     (targeted diff or full rewrite)          │
-                     │  7. Candidate is evaluated & scored          │
-                     │  8. Result stored in MAP-Elites database     │
-                     │     with diversity-aware population mgmt     │
-                     │  9. Stop hook intercepts exit, generates     │
-                     │     NEW dynamic prompt for next iteration    │
-                     └────────────────┬────────────────────────────┘
-                                      │
-                                      ▼
-                          Stops when target score met,
-                          max iterations reached, or
-                          manually cancelled
-```
+<img width="1440" height="1736" alt="image" src="https://github.com/user-attachments/assets/5ba83b44-ac12-416f-ad9e-ef4d2a56a96d" />
+
 
 Each iteration, Claude receives **different context** — a new parent artifact selected from the population, inspiration from diverse high-performing solutions, stagnation diagnostics, strategy directives, and guidance on unexplored regions of the solution space.
 
