@@ -1416,9 +1416,8 @@ class ArtifactDatabase:
     def _is_novel(self, artifact_id: str, island_idx: int) -> bool:
         """Check if an artifact is sufficiently novel compared to island population.
 
-        Uses content similarity (normalized edit distance) against the existing
-        island population. An artifact is novel if its similarity to all existing
-        artifacts in the island is below the configured threshold.
+        Uses the universal novelty system (structural + behavioral + semantic)
+        that works across ALL artifact types — code, prose, configs, SQL, etc.
 
         Returns True if novel (should be added), False if too similar.
         """
@@ -1435,6 +1434,8 @@ class ArtifactDatabase:
         if not artifact_content:
             return True
 
+        from claude_evolve.core.novelty import compute_novelty
+
         for existing_id in island_ids:
             if existing_id == artifact_id:
                 continue
@@ -1442,34 +1443,42 @@ class ArtifactDatabase:
             if existing is None or not existing.content:
                 continue
 
-            # Quick length-based pre-filter
-            len_ratio = min(len(artifact_content), len(existing.content)) / max(len(artifact_content), len(existing.content))
-            if len_ratio > self.config.similarity_threshold:
-                # Lengths are very similar, do a content comparison
-                if artifact_content == existing.content:
-                    logger.debug("Artifact %s is identical to %s", artifact_id, existing_id)
-                    return False
+            # Quick exact-match check
+            if artifact_content == existing.content:
+                logger.debug("Artifact %s is identical to %s", artifact_id, existing_id)
+                return False
 
-                # Use simple line-based similarity for efficiency
-                similarity = self._line_similarity(artifact_content, existing.content)
-                if similarity >= self.config.similarity_threshold:
-                    logger.debug(
-                        "Artifact %s too similar to %s (%.3f >= %.3f)",
-                        artifact_id, existing_id, similarity, self.config.similarity_threshold,
-                    )
-                    return False
+            # Quick length-based pre-filter
+            len_ratio = min(len(artifact_content), len(existing.content)) / max(len(artifact_content), len(existing.content), 1)
+            if len_ratio < 0.5:
+                continue  # Very different lengths = likely novel, skip expensive check
+
+            # Universal novelty check (works for any artifact type)
+            novelty = compute_novelty(
+                artifact_content,
+                existing.content,
+                artifact_type=artifact.artifact_type,
+                metrics_a=artifact.metrics,
+                metrics_b=existing.metrics,
+            )
+
+            # Novelty < (1 - threshold) means too similar
+            if novelty < (1.0 - self.config.similarity_threshold):
+                logger.debug(
+                    "Artifact %s too similar to %s (novelty=%.3f < %.3f)",
+                    artifact_id, existing_id, novelty,
+                    1.0 - self.config.similarity_threshold,
+                )
+                return False
 
         return True
 
     @staticmethod
     def _line_similarity(content_a: str, content_b: str) -> float:
-        """Compute line-based Jaccard similarity between two code strings.
+        """Compute line-based Jaccard similarity between two strings.
 
-        Normalizes lines by stripping whitespace before comparison.
-        Fast O(n) alternative to full edit distance.
-
-        Returns:
-            Float between 0.0 (completely different) and 1.0 (identical).
+        Kept for backward compatibility. For new code, use
+        ``novelty.structural_similarity()`` which is artifact-type-aware.
         """
         lines_a = set(line.strip() for line in content_a.splitlines() if line.strip())
         lines_b = set(line.strip() for line in content_b.splitlines() if line.strip())
@@ -1594,15 +1603,20 @@ class ArtifactDatabase:
         return total / max(1, comparisons)
 
     def _fast_code_diversity(self, content1: str, content2: str) -> float:
-        """Fast approximation of content diversity."""
+        """Fast approximation of content diversity.
+
+        Uses the universal novelty system when artifact types are available,
+        falls back to character-level heuristics for speed.
+        """
         if content1 == content2:
             return 0.0
 
-        length_diff = abs(len(content1) - len(content2))
-        line_diff = abs(content1.count("\n") - content2.count("\n"))
-        char_diff = len(set(content1).symmetric_difference(set(content2)))
-
-        return length_diff * 0.1 + line_diff * 10 + char_diff * 0.5
+        # Use universal structural similarity for better cross-type support
+        from claude_evolve.core.novelty import structural_similarity
+        sim = structural_similarity(content1, content2)
+        # Convert similarity [0,1] to diversity score (higher = more diverse)
+        # Scale to match the old range (roughly 0-1000)
+        return (1.0 - sim) * 1000.0
 
     # ------------------------------------------------------------------
     # Artifact storage (small -> JSON, large -> disk)

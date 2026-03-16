@@ -234,6 +234,29 @@ This lets you accumulate thousands of SA iterations across hundreds of evolution
 - Research agent for SOTA techniques and benchmarks
 - Problem decomposition: separate data prep, model selection, tuning
 
+### Stepping Stones
+
+The system maintains an archive of **diverse intermediate solutions** from previous iterations. These are NOT the best solutions — they are solutions that opened new regions of the search space.
+
+When you see a "Stepping Stones" section in the iteration context, these are diverse intermediates worth studying:
+- They may contain algorithmic ideas the current best doesn't use
+- Combining ideas from multiple stepping stones can produce breakthroughs
+- Even low-scoring stepping stones may contain the kernel of a better approach
+
+**How to use stepping stones:**
+1. Read each stepping stone's approach (even if its score is low)
+2. Identify which IDEAS are novel compared to the current best
+3. Try combining the best idea from a stepping stone with the current approach
+4. This "crossover" of ideas often produces better results than pure mutation
+
+### Crossover via Inspiration
+
+When the context shows multiple high-performing or diverse programs, try **crossover** — combining the best elements of two different approaches:
+1. Identify the key technique in Program A (e.g., its initialization strategy)
+2. Identify the key technique in Program B (e.g., its optimization method)
+3. Build a new candidate that uses A's initialization with B's optimization
+4. This semantic crossover is more powerful than just tweaking one parent
+
 ## Advanced Techniques
 
 ### Ralph Loop Within Evolution

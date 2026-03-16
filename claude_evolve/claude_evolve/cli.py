@@ -319,6 +319,22 @@ def next(state_dir):
         warm_cache.load()
         warm_cache_text = warm_cache.format_for_prompt()
 
+    # Stepping stones — diverse intermediate solutions for inspiration
+    stepping_stones_text = None
+    stones_path = os.path.join(state_dir, "stepping_stones.json")
+    if os.path.exists(stones_path):
+        from claude_evolve.core.novelty import SteppingStonesArchive
+        try:
+            with open(stones_path, "r") as f:
+                stones_data = json.load(f)
+            archive = SteppingStonesArchive.from_list(stones_data)
+            parent_content = parent.content if hasattr(parent, 'content') else parent.get('content', '')
+            stepping_stones_text = archive.format_for_prompt(
+                parent_content, config.artifact_type
+            )
+        except Exception:
+            pass
+
     ctx_builder = ContextBuilder(config.prompt)
     ctx = ctx_builder.build_context(
         parent=parent,
@@ -336,6 +352,7 @@ def next(state_dir):
         research_text=research_text if research_text else None,
         strategy_text=strategy_text,
         warm_cache_text=warm_cache_text if warm_cache_text else None,
+        stepping_stones_text=stepping_stones_text if stepping_stones_text else None,
     )
 
     # Render iteration context
@@ -820,6 +837,25 @@ def submit(candidate, state_dir, metrics):
     # Update best artifact file if new best
     if is_new_best:
         sm.write_best_artifact(candidate_content, config.artifact_type)
+
+    # Add to stepping stones archive (preserves diverse intermediates)
+    try:
+        from claude_evolve.core.novelty import SteppingStonesArchive
+        stones_path = os.path.join(state_dir, "stepping_stones.json")
+        if os.path.exists(stones_path):
+            with open(stones_path, "r") as f:
+                archive = SteppingStonesArchive.from_list(json.load(f))
+        else:
+            archive = SteppingStonesArchive(max_size=50, novelty_threshold=0.3)
+        archive.try_add(
+            candidate_content, validated_metrics,
+            config.artifact_type,
+            metadata={"iteration": current_iteration, "is_new_best": is_new_best},
+        )
+        with open(stones_path, "w") as f:
+            json.dump(archive.to_list(), f)
+    except Exception:
+        pass  # Non-critical — don't fail submit on stepping stone error
 
     # Save state
     sm.save()

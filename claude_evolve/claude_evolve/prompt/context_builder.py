@@ -86,6 +86,7 @@ class ContextBuilder:
         research_text: Optional[str] = None,
         strategy_text: Optional[str] = None,
         warm_cache_text: Optional[str] = None,
+        stepping_stones_text: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Build the full context dict for one evolution iteration.
@@ -252,6 +253,10 @@ class ContextBuilder:
         if warm_cache_text:
             metadata["warm_cache_text"] = warm_cache_text
 
+        # Stepping stones text
+        if stepping_stones_text:
+            metadata["stepping_stones_text"] = stepping_stones_text
+
         return {
             "prompt": user_message,
             "system_message": system_message,
@@ -341,6 +346,12 @@ class ContextBuilder:
         if warm_cache_text:
             warm_cache_template = self.template_manager.get_template("warm_cache")
             lines.append(warm_cache_template.format(warm_cache_content=warm_cache_text))
+            lines.append("")
+
+        # Stepping stones section
+        stepping_stones_text = metadata.get("stepping_stones_text")
+        if stepping_stones_text:
+            lines.append(stepping_stones_text)
             lines.append("")
 
         # Embed the full prompt
