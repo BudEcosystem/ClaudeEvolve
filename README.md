@@ -132,34 +132,8 @@ Each iteration, Claude receives **different context** — a new parent artifact 
 Claude Evolve is a three-layer hybrid system:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  Layer 3: Claude Code Skill + Agents                             │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  SKILL.md — iteration protocol with problem-type guidance  │  │
-│  │  researcher.md — literature search agent                   │  │
-│  │  diagnostician.md — root cause analysis agent              │  │
-│  │  critic.md — adversarial evaluation agent                  │  │
-│  └────────────────────────────────────────────────────────────┘  │
-├──────────────────────────────────────────────────────────────────┤
-│  Layer 2: Python Package (claude_evolve)                         │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────────┐ │
-│  │ Database │ │Evaluator │ │ Context  │ │ Stagnation Engine  │ │
-│  │MAP-Elites│ │Subprocess│ │ Builder  │ │ + Strategy Evolver │ │
-│  │+ Islands │ │Isolation │ │+ Prompts │ │ + Research Log     │ │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────────────┘ │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────────┐ │
-│  │   CLI    │ │  Config  │ │  Warm    │ │  Cross-Run Memory  │ │
-│  │init/next/│ │+ 6 sub-  │ │  Cache   │ │  + Solution Seeding│ │
-│  │submit/.. │ │  configs │ │  (numpy) │ │  + Failed Approach │ │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────────────┘ │
-├──────────────────────────────────────────────────────────────────┤
-│  Layer 1: Shell Loop (Stop Hook)                                 │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  stop-hook.sh — intercepts session exit                    │  │
-│  │  Calls 'claude-evolve diagnose' then 'claude-evolve next'  │  │
-│  │  Checks completion: max iterations / target score / promise│  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
+<img width="1440" height="1524" alt="image" src="https://github.com/user-attachments/assets/0719899d-2d6d-4407-a1d4-3c032e329d10" />
+
 ```
 
 **Layer 1 (Shell)** manages the iteration lifecycle. The stop hook calls `diagnose` (stagnation detection) before `next` (context generation).
