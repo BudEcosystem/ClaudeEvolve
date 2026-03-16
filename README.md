@@ -6,7 +6,7 @@ Claude Evolve uses **MAP-Elites quality-diversity search** with island-based pop
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-797%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-848%20passing-brightgreen.svg)]()
 
 ---
 
@@ -68,7 +68,8 @@ Each iteration, Claude receives **different context** — a new parent artifact 
 ### Evolutionary Algorithm
 - **MAP-Elites quality-diversity search** — maintains diverse elite solutions across configurable feature dimensions
 - **Island-based evolution** — multiple isolated populations with periodic migration
-- **Novelty checking** — Jaccard similarity-based duplicate rejection
+- **Universal novelty system** — 3-layer similarity (structural + behavioral + semantic) working across all artifact types, not just code
+- **Stepping stones archive** — preserves diverse intermediate solutions that open new search space regions
 - **7 built-in strategies** — Incremental, Creative Leap, Hybrid Synthesis, Research-Driven, Solver Hybrid, Multi-Iteration Accumulation, Problem Decomposition
 
 ### Research-Driven Discovery (v2)
@@ -84,6 +85,13 @@ Each iteration, Claude receives **different context** — a new parent artifact 
 - **Evaluation Caching** — skip re-evaluation of deterministic results
 - **Solution Seeding** — inject known-good solutions into the population
 
+### Universal Novelty & Diversity (v3)
+- **Structural similarity** — token n-gram overlap analysis working across Python, JS, YAML, JSON, SQL, markdown, and prose
+- **Behavioral similarity** — metric fingerprint comparison (normalized score vectors across evaluation dimensions)
+- **Semantic fingerprints** — concept extraction identifying algorithmic ideas, data structures, and approaches
+- **Stepping stones** — archive of diverse intermediate solutions injected into iteration context for crossover-inspired evolution
+- **Artifact-agnostic** — same novelty pipeline handles code, prompts, configs, and any text artifact
+
 ### Claude Code Integration
 - **Native plugin** — runs inside Claude Code sessions via `/evolve` command
 - **Dynamic per-iteration prompts** — each iteration gets fresh context with population insights and strategy directives
@@ -96,7 +104,7 @@ Each iteration, Claude receives **different context** — a new parent artifact 
 - **Hybrid problems** (data science, ML) — model checkpoints, hyperparameter search, problem decomposition
 
 ### Production Quality
-- **797 tests** covering unit, integration, and end-to-end flows
+- **848 tests** covering unit, integration, and end-to-end flows
 - **Subprocess isolation** — evaluator runs in isolated subprocess with timeout protection
 - **Checkpoint/resume** — periodic snapshots with seamless resume
 - **Session isolation** — multiple sessions don't interfere
@@ -169,6 +177,29 @@ Learnings persist across evolution runs:
 - Successful strategies (build on)
 - Key insights from prior runs
 
+### Universal Novelty System
+
+Traditional code-evolution systems use code-specific similarity (AST diff, token overlap). Claude Evolve's novelty system works across **all artifact types** via three complementary layers:
+
+| Layer | Method | What It Captures |
+|-------|--------|-----------------|
+| **Structural** | Token n-gram overlap (bigrams + trigrams) | Surface-level textual similarity |
+| **Behavioral** | Metric fingerprint cosine similarity | Functional equivalence (same scores = same behavior) |
+| **Semantic** | Concept extraction + Jaccard overlap | Algorithmic ideas, data structures, approaches |
+
+Combined similarity = weighted average (structural 0.4, behavioral 0.3, semantic 0.3). Candidates above the novelty threshold are rejected as duplicates, preserving population diversity.
+
+### Stepping Stones Archive
+
+Inspired by FunSearch's best-shot prompting and ShinkaEvolve's novelty rejection sampling, the stepping stones archive preserves **diverse intermediate solutions** — not just the best. These are injected into iteration context to enable crossover-style evolution:
+
+1. Each submission is checked against the archive for novelty
+2. Sufficiently novel solutions are preserved regardless of fitness
+3. During context generation, stepping stones from different search space regions are selected
+4. Claude can combine ideas from stepping stones with the current best (semantic crossover)
+
+This prevents the population from collapsing to a single approach and enables discovering solutions that require traversing low-fitness intermediates.
+
 ---
 
 ## Installation
@@ -196,7 +227,7 @@ bash install.sh
 
 ```bash
 claude-evolve --help
-cd claude_evolve && python -m pytest tests/ -q  # 797 tests
+cd claude_evolve && python -m pytest tests/ -q  # 848 tests
 ```
 
 ---
@@ -368,7 +399,8 @@ ClaudeEvolve/
 │   │   │   ├── memory.py             # Cross-run memory (v2)
 │   │   │   ├── research.py           # Research log management (v2)
 │   │   │   ├── strategy.py           # Strategy evolver (v2)
-│   │   │   └── warm_cache.py         # Warm-start cache (v3)
+│   │   │   ├── warm_cache.py         # Warm-start cache (v3)
+│   │   │   └── novelty.py            # Universal novelty system (v3)
 │   │   ├── prompt/
 │   │   │   ├── context_builder.py    # Per-iteration context generation
 │   │   │   └── templates.py          # Template management
@@ -377,7 +409,7 @@ ClaudeEvolve/
 │   │   │   └── checkpoint.py         # Checkpoint management
 │   │   ├── cli.py                    # CLI (init/next/submit/diagnose/seed/cache)
 │   │   └── config.py                 # 6 sub-configs + master config
-│   └── tests/                        # 797 tests
+│   └── tests/                        # 848 tests
 ├── plugin/                           # Claude Code plugin
 │   ├── hooks/stop-hook.sh            # Evolution loop + stagnation
 │   ├── skills/evolve/SKILL.md        # Iteration protocol + problem guidance
@@ -393,7 +425,8 @@ ClaudeEvolve/
 │   ├── program.py                    # Seed program
 │   └── evaluator.py                  # Evaluator (target: 0 mono-K_5 at n=43)
 ├── evolve_output/                    # Best artifacts from evolution runs
-│   └── best_circle_packing_strict.py # Circle packing result (2.635983)
+│   ├── best_circle_packing_strict.py # Circle packing result (2.635983)
+│   └── best_circle_packing_final.py  # Final 15dp result (2.635982928557747)
 ├── docs/
 │   ├── circle_packing_paper.md       # Paper: circle packing result
 │   └── verify_circle_packing.py      # Independent verification script
@@ -408,7 +441,7 @@ ClaudeEvolve/
 
 ```bash
 cd claude_evolve
-python -m pytest tests/ -v             # All 797 tests
+python -m pytest tests/ -v             # All 848 tests
 python -m pytest tests/ -q             # Quick summary
 python -m pytest tests/test_database.py # Specific module
 ```
@@ -418,6 +451,8 @@ python -m pytest tests/test_database.py # Specific module
 ## Acknowledgments
 
 Claude Evolve is inspired by [AlphaEvolve](https://deepmind.google/discover/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/) (Google DeepMind) and built upon the open-source [OpenEvolve](https://github.com/algorithmicsuperintelligence/openevolve) implementation. The loop mechanism is adapted from the [Ralph Loop](https://github.com/anthropics/claude-code-plugins/tree/main/ralph-loop) Claude Code plugin pattern.
+
+The universal novelty system and stepping stones archive draw from research in automated discovery systems including [FunSearch](https://www.nature.com/articles/s41586-023-06924-6) (best-shot prompting, stepping stones), [ShinkaEvolve](https://github.com/XinmingTu/auto-discovery) (code novelty rejection sampling), [CodeEvolve](https://arxiv.org/abs/2410.12553) (inspiration-based crossover), and [DiscoPOP](https://arxiv.org/abs/2401.13385) (quality-diversity for prompt optimization).
 
 ---
 
