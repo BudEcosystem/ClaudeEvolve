@@ -4,11 +4,15 @@ import unittest
 import yaml
 from claude_evolve.config import (
     Config,
+    CrossRunMemoryConfig,
     DatabaseConfig,
+    DiagnosticsConfig,
     EvaluatorConfig,
     PromptConfig,
     EvolutionConfig,
     EvolutionTraceConfig,
+    ResearchConfig,
+    StagnationConfig,
     load_config,
     _resolve_env_vars,
 )
@@ -147,6 +151,115 @@ class TestEvolutionTraceConfig(unittest.TestCase):
         self.assertTrue(c.include_code)
 
 
+class TestStagnationConfig(unittest.TestCase):
+    def test_defaults(self):
+        c = StagnationConfig()
+        self.assertEqual(c.mild_threshold, 3)
+        self.assertEqual(c.moderate_threshold, 6)
+        self.assertEqual(c.severe_threshold, 11)
+        self.assertEqual(c.critical_threshold, 20)
+        self.assertAlmostEqual(c.score_tolerance, 0.001)
+        self.assertAlmostEqual(c.exploration_boost_mild, 0.1)
+        self.assertAlmostEqual(c.exploration_boost_moderate, 0.2)
+        self.assertAlmostEqual(c.exploration_boost_severe, 0.3)
+        self.assertAlmostEqual(c.exploration_boost_critical, 0.5)
+        self.assertTrue(c.enabled)
+
+    def test_custom_values(self):
+        c = StagnationConfig(
+            mild_threshold=5,
+            severe_threshold=15,
+            score_tolerance=0.01,
+            enabled=False,
+        )
+        self.assertEqual(c.mild_threshold, 5)
+        self.assertEqual(c.severe_threshold, 15)
+        self.assertAlmostEqual(c.score_tolerance, 0.01)
+        self.assertFalse(c.enabled)
+
+    def test_threshold_ordering(self):
+        """Default thresholds should increase: mild < moderate < severe < critical."""
+        c = StagnationConfig()
+        self.assertLess(c.mild_threshold, c.moderate_threshold)
+        self.assertLess(c.moderate_threshold, c.severe_threshold)
+        self.assertLess(c.severe_threshold, c.critical_threshold)
+
+
+class TestCrossRunMemoryConfig(unittest.TestCase):
+    def test_defaults(self):
+        c = CrossRunMemoryConfig()
+        self.assertTrue(c.enabled)
+        self.assertEqual(c.memory_dir, "cross_run_memory")
+        self.assertEqual(c.max_learnings, 100)
+        self.assertEqual(c.max_failed_approaches, 50)
+        self.assertAlmostEqual(c.improvement_threshold, 0.01)
+
+    def test_custom_values(self):
+        c = CrossRunMemoryConfig(
+            enabled=False,
+            memory_dir="custom_memory",
+            max_learnings=200,
+            max_failed_approaches=75,
+            improvement_threshold=0.05,
+        )
+        self.assertFalse(c.enabled)
+        self.assertEqual(c.memory_dir, "custom_memory")
+        self.assertEqual(c.max_learnings, 200)
+        self.assertEqual(c.max_failed_approaches, 75)
+        self.assertAlmostEqual(c.improvement_threshold, 0.05)
+
+
+class TestResearchConfig(unittest.TestCase):
+    def test_defaults(self):
+        c = ResearchConfig()
+        self.assertFalse(c.enabled)
+        self.assertEqual(c.trigger, "on_stagnation")
+        self.assertEqual(c.periodic_interval, 10)
+        self.assertEqual(c.max_web_searches, 5)
+        self.assertTrue(c.persist_findings)
+        self.assertEqual(c.research_log_file, "research_log.json")
+
+    def test_custom_values(self):
+        c = ResearchConfig(
+            enabled=True,
+            trigger="always",
+            periodic_interval=5,
+            max_web_searches=10,
+            persist_findings=False,
+            research_log_file="custom_research.json",
+        )
+        self.assertTrue(c.enabled)
+        self.assertEqual(c.trigger, "always")
+        self.assertEqual(c.periodic_interval, 5)
+        self.assertEqual(c.max_web_searches, 10)
+        self.assertFalse(c.persist_findings)
+        self.assertEqual(c.research_log_file, "custom_research.json")
+
+
+class TestDiagnosticsConfig(unittest.TestCase):
+    def test_defaults(self):
+        c = DiagnosticsConfig()
+        self.assertFalse(c.enabled)
+        self.assertEqual(c.trigger, "on_stagnation")
+        self.assertEqual(c.min_stagnation_level, "mild")
+        self.assertTrue(c.persist_reports)
+        self.assertEqual(c.diagnostic_report_file, "diagnostic_report.json")
+
+    def test_custom_values(self):
+        c = DiagnosticsConfig(
+            enabled=True,
+            trigger="always",
+            min_stagnation_level="moderate",
+            persist_reports=False,
+            diagnostic_report_file="custom_diagnostic.json",
+        )
+        self.assertTrue(c.enabled)
+        self.assertEqual(c.trigger, "always")
+        self.assertEqual(c.min_stagnation_level, "moderate")
+        self.assertFalse(c.persist_reports)
+        self.assertEqual(c.diagnostic_report_file, "custom_diagnostic.json")
+
+
 class TestConfig(unittest.TestCase):
     def test_defaults(self):
         c = Config()
@@ -156,6 +269,10 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(c.prompt, PromptConfig)
         self.assertIsInstance(c.evolution, EvolutionConfig)
         self.assertIsInstance(c.evolution_trace, EvolutionTraceConfig)
+        self.assertIsInstance(c.stagnation, StagnationConfig)
+        self.assertIsInstance(c.cross_run_memory, CrossRunMemoryConfig)
+        self.assertIsInstance(c.research, ResearchConfig)
+        self.assertIsInstance(c.diagnostics, DiagnosticsConfig)
         self.assertIsNone(c.target_score)
         self.assertEqual(c.artifact_type, "python")
         self.assertEqual(c.output_dir, "./evolve_output")
@@ -204,6 +321,137 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(c.database.population_size, 1000)
         self.assertEqual(c.evaluator.timeout, 300)
         self.assertEqual(c.artifact_type, "python")
+
+    def test_from_dict_stagnation_overrides(self):
+        d = {
+            "stagnation": {
+                "mild_threshold": 5,
+                "severe_threshold": 15,
+                "score_tolerance": 0.01,
+                "enabled": False,
+            },
+        }
+        c = Config.from_dict(d)
+        self.assertEqual(c.stagnation.mild_threshold, 5)
+        self.assertEqual(c.stagnation.severe_threshold, 15)
+        self.assertAlmostEqual(c.stagnation.score_tolerance, 0.01)
+        self.assertFalse(c.stagnation.enabled)
+        # Unspecified fields keep defaults
+        self.assertEqual(c.stagnation.moderate_threshold, 6)
+        self.assertEqual(c.stagnation.critical_threshold, 20)
+
+    def test_from_dict_cross_run_memory_overrides(self):
+        d = {
+            "cross_run_memory": {
+                "enabled": False,
+                "memory_dir": "my_memory",
+                "max_learnings": 200,
+            },
+        }
+        c = Config.from_dict(d)
+        self.assertFalse(c.cross_run_memory.enabled)
+        self.assertEqual(c.cross_run_memory.memory_dir, "my_memory")
+        self.assertEqual(c.cross_run_memory.max_learnings, 200)
+        # Unspecified fields keep defaults
+        self.assertEqual(c.cross_run_memory.max_failed_approaches, 50)
+        self.assertAlmostEqual(c.cross_run_memory.improvement_threshold, 0.01)
+
+    def test_to_dict_includes_stagnation_and_cross_run_memory(self):
+        c = Config()
+        d = c.to_dict()
+        self.assertIn("stagnation", d)
+        self.assertIn("cross_run_memory", d)
+        self.assertEqual(d["stagnation"]["mild_threshold"], 3)
+        self.assertEqual(d["stagnation"]["enabled"], True)
+        self.assertEqual(d["cross_run_memory"]["enabled"], True)
+        self.assertEqual(d["cross_run_memory"]["memory_dir"], "cross_run_memory")
+
+    def test_to_dict_includes_research_and_diagnostics(self):
+        c = Config()
+        d = c.to_dict()
+        self.assertIn("research", d)
+        self.assertIn("diagnostics", d)
+        self.assertEqual(d["research"]["enabled"], False)
+        self.assertEqual(d["research"]["trigger"], "on_stagnation")
+        self.assertEqual(d["diagnostics"]["enabled"], False)
+        self.assertEqual(d["diagnostics"]["trigger"], "on_stagnation")
+
+    def test_from_dict_research_overrides(self):
+        d = {
+            "research": {
+                "enabled": True,
+                "trigger": "always",
+                "periodic_interval": 5,
+                "max_web_searches": 10,
+            },
+        }
+        c = Config.from_dict(d)
+        self.assertTrue(c.research.enabled)
+        self.assertEqual(c.research.trigger, "always")
+        self.assertEqual(c.research.periodic_interval, 5)
+        self.assertEqual(c.research.max_web_searches, 10)
+        # Unspecified fields keep defaults
+        self.assertTrue(c.research.persist_findings)
+        self.assertEqual(c.research.research_log_file, "research_log.json")
+
+    def test_from_dict_diagnostics_overrides(self):
+        d = {
+            "diagnostics": {
+                "enabled": True,
+                "trigger": "always",
+                "min_stagnation_level": "moderate",
+            },
+        }
+        c = Config.from_dict(d)
+        self.assertTrue(c.diagnostics.enabled)
+        self.assertEqual(c.diagnostics.trigger, "always")
+        self.assertEqual(c.diagnostics.min_stagnation_level, "moderate")
+        # Unspecified fields keep defaults
+        self.assertTrue(c.diagnostics.persist_reports)
+        self.assertEqual(c.diagnostics.diagnostic_report_file, "diagnostic_report.json")
+
+    def test_yaml_roundtrip_with_new_configs(self):
+        c = Config(
+            max_iterations=25,
+            stagnation=StagnationConfig(mild_threshold=4, enabled=False),
+            cross_run_memory=CrossRunMemoryConfig(
+                memory_dir="custom_dir", max_learnings=50
+            ),
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            c.to_yaml(f.name)
+            c2 = Config.from_yaml(f.name)
+        os.unlink(f.name)
+        self.assertEqual(c2.max_iterations, 25)
+        self.assertEqual(c2.stagnation.mild_threshold, 4)
+        self.assertFalse(c2.stagnation.enabled)
+        self.assertEqual(c2.cross_run_memory.memory_dir, "custom_dir")
+        self.assertEqual(c2.cross_run_memory.max_learnings, 50)
+
+    def test_yaml_roundtrip_with_research_and_diagnostics(self):
+        c = Config(
+            max_iterations=30,
+            research=ResearchConfig(
+                enabled=True, trigger="periodic", periodic_interval=5
+            ),
+            diagnostics=DiagnosticsConfig(
+                enabled=True, min_stagnation_level="moderate"
+            ),
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            c.to_yaml(f.name)
+            c2 = Config.from_yaml(f.name)
+        os.unlink(f.name)
+        self.assertEqual(c2.max_iterations, 30)
+        self.assertTrue(c2.research.enabled)
+        self.assertEqual(c2.research.trigger, "periodic")
+        self.assertEqual(c2.research.periodic_interval, 5)
+        self.assertTrue(c2.diagnostics.enabled)
+        self.assertEqual(c2.diagnostics.min_stagnation_level, "moderate")
 
     def test_from_yaml_file(self):
         config_data = {

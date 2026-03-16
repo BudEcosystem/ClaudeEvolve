@@ -165,7 +165,31 @@ fi
 # KEY DIFFERENCE from Ralph Loop: generate a dynamic prompt via 'claude-evolve next'
 NEXT_ITERATION=$((ITERATION + 1))
 
+# Double-check: if the NEXT iteration would exceed max, stop now.
+# This guards against the frontmatter iteration counter lagging behind
+# the database counter (which is the source of truth for submission count).
+if [[ $MAX_ITERATIONS -gt 0 ]] && [[ $NEXT_ITERATION -gt $MAX_ITERATIONS ]]; then
+  echo "Evolution complete: Max iterations ($MAX_ITERATIONS) reached."
+  echo "Run 'claude-evolve export --state-dir $STATE_DIR --output evolve_output/best_artifact' to save the best."
+  rm -f "$EVOLVE_STATE_FILE"
+  exit 0
+fi
+
+# Run stagnation diagnostics (v2) -- non-blocking, output logged for context
+set +e
+DIAGNOSE_OUTPUT=$(claude-evolve diagnose --state-dir "$STATE_DIR" 2>/dev/null)
+DIAGNOSE_EXIT=$?
+set -e
+
+if [[ $DIAGNOSE_EXIT -eq 0 ]] && [[ -n "$DIAGNOSE_OUTPUT" ]]; then
+  STAGNATION_LEVEL=$(echo "$DIAGNOSE_OUTPUT" | jq -r '.level // "none"' 2>/dev/null || echo "none")
+  if [[ "$STAGNATION_LEVEL" != "none" ]]; then
+    echo "Stagnation detected: $STAGNATION_LEVEL" >&2
+  fi
+fi
+
 # Run claude-evolve next to prepare the next iteration context
+# (next command now includes stagnation data and cross-run memory automatically)
 set +e
 NEXT_OUTPUT=$(claude-evolve next --state-dir "$STATE_DIR" 2>&1)
 NEXT_EXIT=$?

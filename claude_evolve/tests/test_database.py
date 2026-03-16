@@ -620,13 +620,158 @@ class TestEdgeCases(unittest.TestCase):
         child_island = db.get("child").metadata.get("island")
         self.assertEqual(parent_island, child_island)
 
-    def test_novelty_check_always_passes_without_embedding(self):
-        """Without embedding client, novelty check should always pass."""
+    def test_novelty_check_passes_for_self(self):
+        """Novelty check should pass when only artifact in island is itself."""
         db = ArtifactDatabase(DatabaseConfig())
         a = Artifact(id="n1", content="x = 1", metrics={"combined_score": 0.5})
         db.add(a)
-        # _is_novel should return True since there's no embedding client
+        # _is_novel should return True since the only island member is itself
         self.assertTrue(db._is_novel("n1", 0))
+
+
+# ---------------------------------------------------------------------------
+# Stagnation-related database methods
+# ---------------------------------------------------------------------------
+class TestDatabaseStagnation(unittest.TestCase):
+    """Tests for stagnation-related database methods."""
+
+    def setUp(self):
+        from claude_evolve.config import DatabaseConfig
+        self.config = DatabaseConfig(in_memory=True, num_islands=2, population_size=100)
+        self.db = ArtifactDatabase(self.config)
+
+    def test_get_score_history_empty(self):
+        """Empty database returns empty score history."""
+        self.assertEqual(self.db.get_score_history(), [])
+
+    def test_get_score_history_ordered(self):
+        """Scores are returned in iteration order."""
+        for i, score in enumerate([0.5, 0.7, 0.6, 0.8]):
+            a = Artifact(id=f"a{i}", content=f"code{i}", metrics={"combined_score": score})
+            self.db.add(a, iteration=i)
+        history = self.db.get_score_history()
+        self.assertEqual(history, [0.5, 0.7, 0.6, 0.8])
+
+    def test_get_score_history_skips_non_numeric(self):
+        """Non-numeric scores are skipped."""
+        a1 = Artifact(id="a1", content="c1", metrics={"combined_score": 0.5})
+        a2 = Artifact(id="a2", content="c2", metrics={"combined_score": "invalid"})
+        a3 = Artifact(id="a3", content="c3", metrics={"other_metric": 0.8})
+        self.db.add(a1, iteration=0)
+        self.db.add(a2, iteration=1)
+        self.db.add(a3, iteration=2)
+        history = self.db.get_score_history()
+        self.assertEqual(history, [0.5])
+
+    def test_detect_stagnation_no_history(self):
+        """detect_stagnation on empty db returns NONE."""
+        report = self.db.detect_stagnation()
+        from claude_evolve.core.stagnation import StagnationLevel
+        self.assertEqual(report.level, StagnationLevel.NONE)
+
+    def test_detect_stagnation_improving(self):
+        """detect_stagnation with improving scores returns NONE."""
+        for i in range(5):
+            a = Artifact(id=f"a{i}", content=f"code{i}", metrics={"combined_score": 0.1 * (i + 1)})
+            self.db.add(a, iteration=i)
+        report = self.db.detect_stagnation()
+        from claude_evolve.core.stagnation import StagnationLevel
+        self.assertEqual(report.level, StagnationLevel.NONE)
+
+    def test_detect_stagnation_plateau(self):
+        """detect_stagnation with plateau returns appropriate level."""
+        # Best at iteration 0, then 5 iterations of lower scores
+        a0 = Artifact(id="a0", content="best", metrics={"combined_score": 0.9})
+        self.db.add(a0, iteration=0)
+        for i in range(1, 6):
+            a = Artifact(id=f"a{i}", content=f"worse{i}", metrics={"combined_score": 0.5})
+            self.db.add(a, iteration=i)
+        report = self.db.detect_stagnation()
+        from claude_evolve.core.stagnation import StagnationLevel
+        self.assertEqual(report.level, StagnationLevel.MILD)
+
+
+# ---------------------------------------------------------------------------
+# Novelty (_is_novel) implementation
+# ---------------------------------------------------------------------------
+class TestIsNovel(unittest.TestCase):
+    """Tests for the _is_novel implementation."""
+
+    def setUp(self):
+        from claude_evolve.config import DatabaseConfig
+        self.config = DatabaseConfig(
+            in_memory=True, num_islands=2, population_size=100,
+            similarity_threshold=0.95,
+        )
+        self.db = ArtifactDatabase(self.config)
+
+    def test_novel_when_island_empty(self):
+        """Artifact is novel when island is empty."""
+        a = Artifact(id="a1", content="code here")
+        self.db.artifacts["a1"] = a
+        self.assertTrue(self.db._is_novel("a1", 0))
+
+    def test_novel_with_different_content(self):
+        """Artifact is novel when content differs significantly."""
+        a1 = Artifact(id="a1", content="def foo():\n    return 1\n")
+        a2 = Artifact(id="a2", content="def bar():\n    x = 42\n    return x * 2\n")
+        self.db.artifacts["a1"] = a1
+        self.db.artifacts["a2"] = a2
+        self.db.islands[0].add("a1")
+        self.assertTrue(self.db._is_novel("a2", 0))
+
+    def test_not_novel_identical_content(self):
+        """Identical content is rejected."""
+        content = "def foo():\n    return 1\n"
+        a1 = Artifact(id="a1", content=content)
+        a2 = Artifact(id="a2", content=content)
+        self.db.artifacts["a1"] = a1
+        self.db.artifacts["a2"] = a2
+        self.db.islands[0].add("a1")
+        self.assertFalse(self.db._is_novel("a2", 0))
+
+    def test_not_novel_very_similar(self):
+        """Very similar content (above threshold) is rejected."""
+        base = "\n".join([f"line_{i} = {i}" for i in range(100)])
+        # Change just one line
+        similar = "\n".join([f"line_{i} = {i}" if i != 50 else "line_50 = 999" for i in range(100)])
+        a1 = Artifact(id="a1", content=base)
+        a2 = Artifact(id="a2", content=similar)
+        self.db.artifacts["a1"] = a1
+        self.db.artifacts["a2"] = a2
+        self.db.islands[0].add("a1")
+        self.assertFalse(self.db._is_novel("a2", 0))
+
+    def test_novel_unknown_artifact_id(self):
+        """Unknown artifact ID returns True."""
+        self.assertTrue(self.db._is_novel("nonexistent", 0))
+
+
+# ---------------------------------------------------------------------------
+# Line similarity helper
+# ---------------------------------------------------------------------------
+class TestLineSimilarity(unittest.TestCase):
+    """Tests for _line_similarity helper."""
+
+    def test_identical(self):
+        self.assertAlmostEqual(ArtifactDatabase._line_similarity("a\nb\nc", "a\nb\nc"), 1.0)
+
+    def test_completely_different(self):
+        self.assertAlmostEqual(ArtifactDatabase._line_similarity("a\nb\nc", "x\ny\nz"), 0.0)
+
+    def test_partial_overlap(self):
+        sim = ArtifactDatabase._line_similarity("a\nb\nc\nd", "a\nb\nx\ny")
+        self.assertGreater(sim, 0.0)
+        self.assertLess(sim, 1.0)
+
+    def test_empty_strings(self):
+        self.assertAlmostEqual(ArtifactDatabase._line_similarity("", ""), 1.0)
+
+    def test_one_empty(self):
+        self.assertAlmostEqual(ArtifactDatabase._line_similarity("a\nb", ""), 0.0)
+
+    def test_whitespace_normalization(self):
+        self.assertAlmostEqual(ArtifactDatabase._line_similarity("  a  \n  b  ", "a\nb"), 1.0)
 
 
 if __name__ == "__main__":

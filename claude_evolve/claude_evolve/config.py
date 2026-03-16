@@ -230,6 +230,80 @@ class EvolutionTraceConfig:
 
 
 @dataclass
+class StagnationConfig:
+    """Configuration for stagnation detection engine."""
+
+    # Iteration thresholds for stagnation levels
+    mild_threshold: int = 3
+    moderate_threshold: int = 6
+    severe_threshold: int = 11
+    critical_threshold: int = 20
+
+    # Score comparison tolerance
+    score_tolerance: float = 0.001
+
+    # Exploration ratio boosts per level
+    exploration_boost_mild: float = 0.1
+    exploration_boost_moderate: float = 0.2
+    exploration_boost_severe: float = 0.3
+    exploration_boost_critical: float = 0.5
+
+    # Enable/disable stagnation detection
+    enabled: bool = True
+
+
+@dataclass
+class CrossRunMemoryConfig:
+    """Configuration for cross-run memory persistence."""
+
+    # Enable/disable cross-run memory
+    enabled: bool = True
+
+    # Directory for memory storage (relative to state_dir)
+    memory_dir: str = "cross_run_memory"
+
+    # Maximum number of learnings to persist
+    max_learnings: int = 100
+
+    # Maximum number of failed approaches to remember
+    max_failed_approaches: int = 50
+
+    # Score improvement threshold to count as a "learning"
+    improvement_threshold: float = 0.01
+
+
+@dataclass
+class ResearchConfig:
+    """Configuration for the research agent integration.
+
+    Controls when the researcher agent is triggered and how its findings
+    are persisted and injected into evolution prompts.
+    """
+
+    enabled: bool = False
+    trigger: str = "on_stagnation"  # "always", "on_stagnation", "periodic", "never"
+    periodic_interval: int = 10
+    max_web_searches: int = 5
+    persist_findings: bool = True
+    research_log_file: str = "research_log.json"
+
+
+@dataclass
+class DiagnosticsConfig:
+    """Configuration for the diagnostician agent integration.
+
+    Controls when the diagnostician agent is triggered and how its
+    reports are persisted.
+    """
+
+    enabled: bool = False
+    trigger: str = "on_stagnation"  # "always", "on_stagnation", "never"
+    min_stagnation_level: str = "mild"  # Minimum level to trigger
+    persist_reports: bool = True
+    diagnostic_report_file: str = "diagnostic_report.json"
+
+
+@dataclass
 class Config:
     """Master configuration for claude_evolve.
 
@@ -258,6 +332,10 @@ class Config:
     evaluator: EvaluatorConfig = field(default_factory=EvaluatorConfig)
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
     evolution_trace: EvolutionTraceConfig = field(default_factory=EvolutionTraceConfig)
+    stagnation: StagnationConfig = field(default_factory=StagnationConfig)
+    cross_run_memory: CrossRunMemoryConfig = field(default_factory=CrossRunMemoryConfig)
+    research: ResearchConfig = field(default_factory=ResearchConfig)
+    diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
 
     # Early stopping settings
     early_stopping_patience: Optional[int] = None

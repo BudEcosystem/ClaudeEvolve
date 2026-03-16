@@ -1,9 +1,13 @@
 {
   "name": "claude-evolve",
-  "description": "Evolutionary code and artifact optimization powered by OpenEvolve. Evolve programs, prompts, algorithms, and any text artifact using MAP-Elites quality-diversity search with Claude as the intelligent mutation engine.",
+  "description": "Evolutionary artifact optimization for Claude Code. Iteratively evolve programs using MAP-Elites quality-diversity search with script or critic evaluation.",
   "version": "0.1.0",
   "author": {
-    "name": "Claude Evolve",
-    "email": "noreply@example.com"
-  }
+    "name": "BudEcosystem",
+    "email": "support@budecosystem.com"
+  },
+  "homepage": "https://github.com/BudEcosystem/ClaudeEvolve",
+  "repository": "https://github.com/BudEcosystem/ClaudeEvolve",
+  "license": "MIT",
+  "keywords": ["evolution", "optimization", "map-elites", "alphaevolve"]
 }

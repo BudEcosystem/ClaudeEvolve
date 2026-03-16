@@ -101,7 +101,9 @@ def main():
               help="Optional early stop threshold score.")
 @click.option("--state-dir", type=click.Path(), default=".claude/evolve-state",
               help="Path to the evolution state directory.")
-def init(artifact, evaluator, mode, config_path, max_iterations, target_score, state_dir):
+@click.option("--keep-state", is_flag=True, default=False,
+              help="Keep existing state directory (don't clear). Useful for resuming.")
+def init(artifact, evaluator, mode, config_path, max_iterations, target_score, state_dir, keep_state):
     """Initialize a new evolution run."""
     # Validate files exist
     if not os.path.exists(artifact):
@@ -139,6 +141,7 @@ def init(artifact, evaluator, mode, config_path, max_iterations, target_score, s
         initial_content=initial_content,
         artifact_type=artifact_type,
         evaluator_path=os.path.abspath(evaluator),
+        fresh=not keep_state,
     )
 
     # Persist evaluator path separately so submit can find it
@@ -168,6 +171,21 @@ def init(artifact, evaluator, mode, config_path, max_iterations, target_score, s
         except Exception as e:
             click.echo(f"Warning: Baseline evaluation failed: {e}", err=True)
             baseline_score = 0.0
+
+    # Auto-seed from cross-run memory if available
+    if config.cross_run_memory.enabled:
+        memory_dir = os.path.join(state_dir, config.cross_run_memory.memory_dir)
+        if os.path.exists(memory_dir):
+            from claude_evolve.core.memory import CrossRunMemory
+            memory = CrossRunMemory(
+                memory_dir=memory_dir,
+                max_learnings=config.cross_run_memory.max_learnings,
+                max_failed_approaches=config.cross_run_memory.max_failed_approaches,
+            )
+            memory.load()
+            # Log that cross-run memory was found
+            click.echo(f"Found cross-run memory with {len(memory.learnings)} learnings, "
+                       f"{len(memory.failed_approaches)} failed approaches", err=True)
 
     # Save state including any baseline metrics
     sm.save()
@@ -203,6 +221,12 @@ def next(state_dir):
 
     config = sm.get_config()
     db = sm.get_database()
+
+    # Check if max iterations exceeded
+    next_iteration = db.last_iteration + 1
+    if config.max_iterations > 0 and next_iteration > config.max_iterations:
+        click.echo(f"Max iterations ({config.max_iterations}) reached. No more iterations.", err=True)
+        raise SystemExit(1)
 
     # Sample parent + inspirations
     try:
@@ -240,6 +264,61 @@ def next(state_dir):
     if best is not None:
         best_score = best.metrics.get("combined_score", 0.0)
 
+    # Stagnation detection (v2)
+    stagnation_report = None
+    if config.stagnation.enabled:
+        stagnation_report = db.detect_stagnation(config.stagnation)
+
+    # Cross-run memory (v2)
+    cross_run_memory_text = None
+    if config.cross_run_memory.enabled:
+        memory_dir = os.path.join(state_dir, config.cross_run_memory.memory_dir)
+        if os.path.exists(memory_dir):
+            from claude_evolve.core.memory import CrossRunMemory
+            memory = CrossRunMemory(
+                memory_dir=memory_dir,
+                max_learnings=config.cross_run_memory.max_learnings,
+                max_failed_approaches=config.cross_run_memory.max_failed_approaches,
+            )
+            memory.load()
+            cross_run_memory_text = memory.format_for_prompt()
+
+    # Research findings (v2 phase 2)
+    research_text = None
+    if config.research.enabled:
+        research_log_path = os.path.join(state_dir, config.research.research_log_file)
+        from claude_evolve.core.research import ResearchLog
+        research_log = ResearchLog(research_log_path)
+        research_log.load()
+
+        stagnation_level_str = stagnation_report.level.value if stagnation_report else "none"
+        if research_log.should_research(db.last_iteration + 1, stagnation_level_str, config.research):
+            # Add a research trigger marker to metadata
+            # (The actual research agent is spawned by the SKILL.md guidance)
+            pass
+
+        research_text = research_log.format_for_prompt()
+
+    # Strategy selection (v2 phase 3)
+    strategy_text = None
+    stagnation_level_str = stagnation_report.level.value if stagnation_report else "none"
+    strategies_path = os.path.join(state_dir, "strategies.json")
+    from claude_evolve.core.strategy import StrategyManager
+    strategy_mgr = StrategyManager(strategies_path)
+    strategy_mgr.load()
+    selected_strategy = strategy_mgr.select_strategy(stagnation_level_str)
+    strategy_text = strategy_mgr.format_for_prompt(selected_strategy)
+    strategy_mgr.save()
+
+    # Warm-start cache
+    warm_cache_text = None
+    warm_cache_dir = os.path.join(state_dir, "warm_cache")
+    if os.path.exists(warm_cache_dir):
+        from claude_evolve.core.warm_cache import WarmCache
+        warm_cache = WarmCache(warm_cache_dir)
+        warm_cache.load()
+        warm_cache_text = warm_cache.format_for_prompt()
+
     ctx_builder = ContextBuilder(config.prompt)
     ctx = ctx_builder.build_context(
         parent=parent,
@@ -252,6 +331,11 @@ def next(state_dir):
         diff_based=config.evolution.diff_based,
         parent_artifacts=parent_artifacts,
         feature_dimensions=config.database.feature_dimensions,
+        stagnation_report=stagnation_report,
+        cross_run_memory_text=cross_run_memory_text if cross_run_memory_text else None,
+        research_text=research_text if research_text else None,
+        strategy_text=strategy_text,
+        warm_cache_text=warm_cache_text if warm_cache_text else None,
     )
 
     # Render iteration context
@@ -267,6 +351,366 @@ def next(state_dir):
 
     # Print prompt text to stdout for the stop hook
     click.echo(rendered)
+
+
+# ---------------------------------------------------------------------------
+# diagnose
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--state-dir", type=click.Path(), default=".claude/evolve-state",
+              help="Path to the evolution state directory.")
+def diagnose(state_dir):
+    """Run stagnation detection and output a diagnostic report."""
+    sm = StateManager(state_dir)
+    try:
+        sm.load()
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+    config = sm.get_config()
+    db = sm.get_database()
+
+    report = db.detect_stagnation(config.stagnation)
+
+    output = {
+        "level": report.level.value,
+        "iterations_stagnant": report.iterations_stagnant,
+        "best_score": report.best_score,
+        "exploration_ratio_boost": report.exploration_ratio_boost,
+        "suggested_strategy": report.suggested_strategy,
+        "diagnosis": report.diagnosis,
+        "recommendations": report.recommendations,
+        "failed_approaches": report.failed_approaches,
+    }
+
+    click.echo(json.dumps(output, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# research-log
+# ---------------------------------------------------------------------------
+
+@main.command("research-log")
+@click.option("--state-dir", type=click.Path(), default=".claude/evolve-state",
+              help="Path to the evolution state directory.")
+@click.option("--findings", required=True, type=str,
+              help="JSON string of research findings to append.")
+def research_log(state_dir, findings):
+    """Append research findings to the research log (called by researcher agent)."""
+    import time
+    from claude_evolve.core.research import ResearchFinding, ResearchLog
+
+    # Load state to get config
+    sm = StateManager(state_dir)
+    try:
+        sm.load()
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+    config = sm.get_config()
+    db = sm.get_database()
+
+    # Parse findings JSON
+    try:
+        raw_findings = json.loads(findings)
+    except json.JSONDecodeError as e:
+        click.echo(f"Error: Invalid findings JSON: {e}", err=True)
+        raise SystemExit(1)
+
+    if not isinstance(raw_findings, list):
+        raw_findings = [raw_findings]
+
+    # Load research log
+    log_path = os.path.join(state_dir, config.research.research_log_file)
+    rlog = ResearchLog(log_path)
+    rlog.load()
+
+    # Add each finding
+    added_count = 0
+    current_iteration = db.last_iteration
+    for raw in raw_findings:
+        if not isinstance(raw, dict):
+            click.echo(f"Warning: Skipping non-dict finding: {raw}", err=True)
+            continue
+
+        # Ensure required fields have defaults
+        finding_id = raw.get("id", f"research-{current_iteration}-{added_count}")
+        finding = ResearchFinding(
+            id=finding_id,
+            iteration=raw.get("iteration", current_iteration),
+            timestamp=raw.get("timestamp", time.time()),
+            approach_name=raw.get("approach_name", raw.get("name", "Unknown")),
+            description=raw.get("description", ""),
+            novelty=raw.get("novelty", "medium"),
+            implementation_hint=raw.get("implementation_hint", ""),
+            source_url=raw.get("source_url", ""),
+            was_tried=raw.get("was_tried", False),
+            outcome_score=raw.get("outcome_score"),
+            metadata=raw.get("metadata", {}),
+        )
+        rlog.add_finding(finding)
+        added_count += 1
+
+    # Handle theoretical bounds, key papers, and approaches to avoid
+    # if present in the top-level JSON
+    if isinstance(raw_findings, list) and len(raw_findings) > 0:
+        first = raw_findings[0]
+        if isinstance(first, dict):
+            if "theoretical_bounds" in first and isinstance(first["theoretical_bounds"], dict):
+                rlog.theoretical_bounds.update(first["theoretical_bounds"])
+            if "key_papers" in first and isinstance(first["key_papers"], list):
+                rlog.key_papers.extend(first["key_papers"])
+            if "approaches_to_avoid" in first and isinstance(first["approaches_to_avoid"], list):
+                rlog.approaches_to_avoid.extend(first["approaches_to_avoid"])
+
+    # Save
+    if config.research.persist_findings:
+        rlog.save()
+
+    click.echo(json.dumps({
+        "status": "appended",
+        "findings_added": added_count,
+        "total_findings": len(rlog.findings),
+    }))
+
+
+# ---------------------------------------------------------------------------
+# cache-eval
+# ---------------------------------------------------------------------------
+
+@main.command("cache-eval")
+@click.option("--state-dir", type=click.Path(), default=".claude/evolve-state",
+              help="Path to the evolution state directory.")
+@click.option("--n", type=int, required=True, help="The n value that was verified")
+@click.option("--result", required=True, type=str, help="JSON result for this n")
+def cache_eval(state_dir, n, result):
+    """Cache evaluation result for a specific n value (avoids re-evaluation)."""
+    # Parse the result JSON
+    try:
+        result_data = json.loads(result)
+    except json.JSONDecodeError as e:
+        click.echo(f"Error: Invalid result JSON: {e}", err=True)
+        raise SystemExit(1)
+
+    # Ensure state directory exists
+    os.makedirs(state_dir, exist_ok=True)
+
+    # Load existing eval cache or create new one
+    cache_path = os.path.join(state_dir, "eval_cache.json")
+    if os.path.exists(cache_path):
+        with open(cache_path, "r") as f:
+            cache = json.load(f)
+    else:
+        cache = {}
+
+    # Store the result keyed by n
+    cache[str(n)] = result_data
+
+    # Write back
+    with open(cache_path, "w") as f:
+        json.dump(cache, f, indent=2)
+
+    click.echo(json.dumps({
+        "status": "cached",
+        "n": n,
+        "cache_size": len(cache),
+    }))
+
+
+# ---------------------------------------------------------------------------
+# seed
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--state-dir", type=click.Path(), default=".claude/evolve-state")
+@click.option("--artifact", required=True, type=click.Path(exists=True),
+              help="Path to artifact file to seed into population")
+@click.option("--metrics", default=None, type=str,
+              help="Optional pre-computed metrics as JSON")
+@click.option("--description", default="Manually seeded artifact",
+              help="Description of the seeded artifact")
+def seed(state_dir, artifact, metrics, description):
+    """Seed a known-good artifact into the evolution population.
+
+    Use this to inject previously discovered solutions (from cross-run memory,
+    external sources, or manual construction) into the current evolution run.
+    """
+    sm = StateManager(state_dir)
+    try:
+        sm.load()
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+    config = sm.get_config()
+    db = sm.get_database()
+
+    with open(artifact, "r") as f:
+        content = f.read()
+
+    parsed_metrics = {}
+    if metrics:
+        try:
+            parsed_metrics = json.loads(metrics)
+        except json.JSONDecodeError as e:
+            click.echo(f"Error: Invalid metrics JSON: {e}", err=True)
+            raise SystemExit(1)
+
+    new_artifact = Artifact(
+        id=Artifact.generate_id(),
+        content=content,
+        artifact_type=config.artifact_type,
+        generation=0,
+        metrics=parsed_metrics,
+        metadata={
+            "source": "manual_seed",
+            "description": description,
+        },
+    )
+
+    db.add(new_artifact, iteration=db.last_iteration)
+    sm.save()
+
+    click.echo(json.dumps({
+        "status": "seeded",
+        "artifact_id": new_artifact.id,
+        "metrics": parsed_metrics,
+    }))
+
+
+# ---------------------------------------------------------------------------
+# cache
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--state-dir", type=click.Path(), default=".claude/evolve-state",
+              help="Path to the evolution state directory.")
+@click.option("--key", required=True, help="Cache key to inspect.")
+def cache(state_dir, key):
+    """Inspect warm cache contents."""
+    from claude_evolve.core.warm_cache import WarmCache
+
+    warm_cache_dir = os.path.join(state_dir, "warm_cache")
+    wc = WarmCache(warm_cache_dir)
+    wc.load()
+
+    if not wc.has(key):
+        click.echo(json.dumps({
+            "status": "not_found",
+            "key": key,
+            "available_keys": wc.keys(),
+        }))
+        return
+
+    info = wc.manifest[key]
+    output = {
+        "status": "found",
+        "key": key,
+        "type": info.get("type", "unknown"),
+        "timestamp": info.get("timestamp"),
+        "metadata": info.get("metadata", {}),
+    }
+
+    # Include type-specific details
+    if info["type"] == "numpy":
+        output["shape"] = info.get("shape")
+        output["dtype"] = info.get("dtype")
+    elif info["type"] == "json":
+        data = wc.get_json(key)
+        if data is not None:
+            # Include a preview for small data
+            preview = json.dumps(data)
+            if len(preview) > 500:
+                preview = preview[:500] + "..."
+            output["preview"] = preview
+    elif info["type"] == "text":
+        text = wc.get_text(key)
+        if text is not None:
+            preview = text[:500] + "..." if len(text) > 500 else text
+            output["preview"] = preview
+
+    click.echo(json.dumps(output, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# cache-put
+# ---------------------------------------------------------------------------
+
+@main.command("cache-put")
+@click.option("--state-dir", type=click.Path(), default=".claude/evolve-state",
+              help="Path to the evolution state directory.")
+@click.option("--key", required=True, help="Cache key to store under.")
+@click.option("--file", "file_path", required=True, type=click.Path(exists=True),
+              help="Path to the file to cache.")
+@click.option("--type", "data_type", type=click.Choice(["numpy", "json", "text"]),
+              default="numpy", help="Data type of the file (default: numpy).")
+@click.option("--description", default="", help="Human-readable description of cached item.")
+@click.option("--score", type=float, default=None, help="Associated score for this cached item.")
+def cache_put(state_dir, key, file_path, data_type, description, score):
+    """Save a file to the warm cache (called by candidate scripts).
+
+    Stores the specified file in the warm-start cache under the given key.
+    Subsequent evolution iterations can load this cached state to avoid
+    recomputing expensive intermediate results.
+    """
+    import numpy as np
+
+    from claude_evolve.core.warm_cache import WarmCache
+
+    warm_cache_dir = os.path.join(state_dir, "warm_cache")
+    wc = WarmCache(warm_cache_dir)
+    wc.load()
+
+    metadata = {}
+    if description:
+        metadata["description"] = description
+    if score is not None:
+        metadata["score"] = score
+
+    if data_type == "numpy":
+        try:
+            array = np.load(file_path)
+        except Exception as e:
+            click.echo(f"Error: Failed to load numpy file: {e}", err=True)
+            raise SystemExit(1)
+        wc.put_numpy(key, array, metadata=metadata)
+        click.echo(json.dumps({
+            "status": "cached",
+            "key": key,
+            "type": "numpy",
+            "shape": list(array.shape),
+            "dtype": str(array.dtype),
+        }))
+    elif data_type == "json":
+        try:
+            with open(file_path, "r") as f:
+                data = json.load(f)
+        except Exception as e:
+            click.echo(f"Error: Failed to load JSON file: {e}", err=True)
+            raise SystemExit(1)
+        wc.put_json(key, data, metadata=metadata)
+        click.echo(json.dumps({
+            "status": "cached",
+            "key": key,
+            "type": "json",
+        }))
+    elif data_type == "text":
+        try:
+            with open(file_path, "r") as f:
+                text = f.read()
+        except Exception as e:
+            click.echo(f"Error: Failed to read text file: {e}", err=True)
+            raise SystemExit(1)
+        wc.put_text(key, text, metadata=metadata)
+        click.echo(json.dumps({
+            "status": "cached",
+            "key": key,
+            "type": "text",
+            "length": len(text),
+        }))
 
 
 # ---------------------------------------------------------------------------

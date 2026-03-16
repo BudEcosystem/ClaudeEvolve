@@ -81,6 +81,11 @@ class ContextBuilder:
         parent_artifacts: Optional[Dict[str, Union[str, bytes]]] = None,
         feature_dimensions: Optional[List[str]] = None,
         current_changes_description: Optional[str] = None,
+        stagnation_report: Optional[Any] = None,
+        cross_run_memory_text: Optional[str] = None,
+        research_text: Optional[str] = None,
+        strategy_text: Optional[str] = None,
+        warm_cache_text: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Build the full context dict for one evolution iteration.
@@ -103,6 +108,18 @@ class ContextBuilder:
             feature_dimensions: MAP-Elites feature dimension names.
             current_changes_description: Changes description text for
                 the parent program.
+            stagnation_report: Optional StagnationReport from the
+                StagnationEngine. When present, stagnation guidance is
+                injected into the prompt.
+            cross_run_memory_text: Optional pre-formatted text from
+                CrossRunMemory.format_for_prompt(). When present,
+                cross-run learnings are injected into the prompt.
+            research_text: Optional pre-formatted text from
+                ResearchLog.format_for_prompt(). When present,
+                research findings are injected into the prompt.
+            warm_cache_text: Optional pre-formatted text from
+                WarmCache.format_for_prompt(). When present,
+                warm-start cache info is injected into the prompt.
             **kwargs: Extra keys forwarded into the user template.
 
         Returns:
@@ -206,18 +223,40 @@ class ContextBuilder:
                 "user_message_with_changes_description"
             ).format(user_message=user_message, changes_description=desc)
 
+        metadata = {
+            "iteration": iteration,
+            "best_score": best_score,
+            "parent_metrics": program_metrics,
+            "diff_based": diff_based,
+            "language": artifact_type,
+            "feature_dimensions": feature_dimensions,
+        }
+
+        # Stagnation report (v2)
+        if stagnation_report is not None:
+            metadata["stagnation_report"] = stagnation_report
+
+        # Cross-run memory text (v2)
+        if cross_run_memory_text:
+            metadata["cross_run_memory_text"] = cross_run_memory_text
+
+        # Research findings text (v2 phase 2)
+        if research_text:
+            metadata["research_text"] = research_text
+
+        # Strategy directive text (v2 phase 3)
+        if strategy_text:
+            metadata["strategy_text"] = strategy_text
+
+        # Warm-start cache text
+        if warm_cache_text:
+            metadata["warm_cache_text"] = warm_cache_text
+
         return {
             "prompt": user_message,
             "system_message": system_message,
             "parent_id": parent_id,
-            "metadata": {
-                "iteration": iteration,
-                "best_score": best_score,
-                "parent_metrics": program_metrics,
-                "diff_based": diff_based,
-                "language": artifact_type,
-                "feature_dimensions": feature_dimensions,
-            },
+            "metadata": metadata,
         }
 
     def render_iteration_context(
@@ -269,6 +308,41 @@ class ContextBuilder:
                     lines.append(f"- {name}: {value}")
             lines.append("")
 
+        # Stagnation report section (v2)
+        stagnation_report = metadata.get("stagnation_report")
+        if stagnation_report is not None:
+            stagnation_section = self._render_stagnation_section(stagnation_report)
+            if stagnation_section:
+                lines.append(stagnation_section)
+                lines.append("")
+
+        # Cross-run memory section (v2)
+        cross_run_text = metadata.get("cross_run_memory_text")
+        if cross_run_text:
+            memory_template = self.template_manager.get_template("cross_run_memory")
+            lines.append(memory_template.format(memory_content=cross_run_text))
+            lines.append("")
+
+        # Research findings section (v2 phase 2)
+        research_text = metadata.get("research_text")
+        if research_text:
+            research_template = self.template_manager.get_template("research_findings")
+            lines.append(research_template.format(research_content=research_text))
+            lines.append("")
+
+        # Strategy directive section (v2 phase 3)
+        strategy_text = metadata.get("strategy_text")
+        if strategy_text:
+            lines.append(strategy_text)
+            lines.append("")
+
+        # Warm-start cache section
+        warm_cache_text = metadata.get("warm_cache_text")
+        if warm_cache_text:
+            warm_cache_template = self.template_manager.get_template("warm_cache")
+            lines.append(warm_cache_template.format(warm_cache_content=warm_cache_text))
+            lines.append("")
+
         # Embed the full prompt
         lines.append("## Evolution Prompt")
         lines.append("")
@@ -288,6 +362,56 @@ class ContextBuilder:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _render_stagnation_section(self, report: Any) -> str:
+        """Render a StagnationReport into a Markdown section for the prompt.
+
+        Args:
+            report: A StagnationReport object with level, iterations_stagnant,
+                    best_score, diagnosis, recommendations, suggested_strategy,
+                    and failed_approaches attributes.
+
+        Returns:
+            Rendered Markdown string, or empty string if level is NONE.
+        """
+        # Import here to avoid circular dependency
+        from claude_evolve.core.stagnation import StagnationLevel
+
+        level = report.level
+        if level == StagnationLevel.NONE:
+            return ""
+
+        # Get strategy guidance from fragment
+        strategy_key = f"strategy_{report.suggested_strategy}"
+        if self.template_manager.has_fragment(strategy_key):
+            strategy_guidance = self.template_manager.get_fragment(strategy_key)
+        else:
+            strategy_guidance = report.suggested_strategy
+
+        # Format recommendations as bullet list
+        recommendations = "\n".join(f"- {r}" for r in report.recommendations)
+
+        # Format failed approaches section
+        failed_section = ""
+        if report.failed_approaches:
+            header = self.template_manager.get_fragment("stagnation_failed_approaches_header")
+            items = "\n".join(
+                self.template_manager.get_fragment("stagnation_failed_approach_item", approach=fa)
+                for fa in report.failed_approaches
+            )
+            failed_section = f"{header}{items}\n"
+
+        # Use the stagnation guidance template
+        template = self.template_manager.get_template("stagnation_guidance")
+        return template.format(
+            stagnation_level=level.value.upper(),
+            iterations_stagnant=report.iterations_stagnant,
+            best_score=report.best_score,
+            diagnosis=report.diagnosis,
+            recommendations=recommendations,
+            strategy_guidance=strategy_guidance,
+            failed_approaches_section=failed_section,
+        )
 
     @staticmethod
     def _normalize_parent(parent: Any) -> Dict[str, Any]:

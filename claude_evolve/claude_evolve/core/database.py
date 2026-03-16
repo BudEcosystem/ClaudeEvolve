@@ -1360,15 +1360,129 @@ class ArtifactDatabase:
                         self.island_best_programs[i] = best_a.id
 
     # ------------------------------------------------------------------
+    # Stagnation
+    # ------------------------------------------------------------------
+
+    def get_score_history(self, min_iteration: int = 0) -> List[float]:
+        """Return combined_score values in chronological order (by iteration_found).
+
+        Iterates all artifacts, sorts by iteration_found, and extracts
+        the combined_score metric. Useful for stagnation detection.
+
+        Args:
+            min_iteration: Only include artifacts from this iteration onward.
+                Defaults to 0 (includes all). Use this to scope score history
+                to the current run and avoid contamination from previous runs.
+
+        Returns:
+            List of floats representing the score at each iteration.
+        """
+        # Get all artifacts sorted by iteration_found
+        sorted_artifacts = sorted(
+            self.artifacts.values(),
+            key=lambda a: (a.iteration_found, a.timestamp),
+        )
+
+        scores = []
+        for artifact in sorted_artifacts:
+            if artifact.iteration_found < min_iteration:
+                continue
+            score = artifact.metrics.get("combined_score")
+            if score is not None and isinstance(score, (int, float)):
+                scores.append(float(score))
+
+        return scores
+
+    def detect_stagnation(self, config=None) -> "StagnationReport":
+        """Run stagnation detection on the current score history.
+
+        Args:
+            config: Optional StagnationConfig (from config.py or stagnation.py).
+                    If None, uses default thresholds.
+
+        Returns:
+            StagnationReport from the StagnationEngine.
+        """
+        from claude_evolve.core.stagnation import StagnationEngine
+
+        engine = StagnationEngine(config)
+        score_history = self.get_score_history()
+        return engine.analyze(score_history)
+
+    # ------------------------------------------------------------------
     # Novelty
     # ------------------------------------------------------------------
 
     def _is_novel(self, artifact_id: str, island_idx: int) -> bool:
+        """Check if an artifact is sufficiently novel compared to island population.
+
+        Uses content similarity (normalized edit distance) against the existing
+        island population. An artifact is novel if its similarity to all existing
+        artifacts in the island is below the configured threshold.
+
+        Returns True if novel (should be added), False if too similar.
         """
-        Simple novelty check. Embedding-based novelty (cosine similarity +
-        LLM judge) is skipped in claude_evolve. Always returns ``True``.
-        """
+        if artifact_id not in self.artifacts:
+            return True
+
+        artifact = self.artifacts[artifact_id]
+        island_ids = self.islands[island_idx]
+
+        if not island_ids:
+            return True
+
+        artifact_content = artifact.content
+        if not artifact_content:
+            return True
+
+        for existing_id in island_ids:
+            if existing_id == artifact_id:
+                continue
+            existing = self.artifacts.get(existing_id)
+            if existing is None or not existing.content:
+                continue
+
+            # Quick length-based pre-filter
+            len_ratio = min(len(artifact_content), len(existing.content)) / max(len(artifact_content), len(existing.content))
+            if len_ratio > self.config.similarity_threshold:
+                # Lengths are very similar, do a content comparison
+                if artifact_content == existing.content:
+                    logger.debug("Artifact %s is identical to %s", artifact_id, existing_id)
+                    return False
+
+                # Use simple line-based similarity for efficiency
+                similarity = self._line_similarity(artifact_content, existing.content)
+                if similarity >= self.config.similarity_threshold:
+                    logger.debug(
+                        "Artifact %s too similar to %s (%.3f >= %.3f)",
+                        artifact_id, existing_id, similarity, self.config.similarity_threshold,
+                    )
+                    return False
+
         return True
+
+    @staticmethod
+    def _line_similarity(content_a: str, content_b: str) -> float:
+        """Compute line-based Jaccard similarity between two code strings.
+
+        Normalizes lines by stripping whitespace before comparison.
+        Fast O(n) alternative to full edit distance.
+
+        Returns:
+            Float between 0.0 (completely different) and 1.0 (identical).
+        """
+        lines_a = set(line.strip() for line in content_a.splitlines() if line.strip())
+        lines_b = set(line.strip() for line in content_b.splitlines() if line.strip())
+
+        if not lines_a and not lines_b:
+            return 1.0
+        if not lines_a or not lines_b:
+            return 0.0
+
+        intersection = len(lines_a & lines_b)
+        union = len(lines_a | lines_b)
+
+        return intersection / union if union > 0 else 0.0
 
     # ------------------------------------------------------------------
     # Diversity

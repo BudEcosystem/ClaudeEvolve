@@ -175,6 +175,126 @@ EVALUATION_TEMPLATE = (
     "}}"
 )
 
+# ---------------------------------------------------------------------------
+# Stagnation-aware templates (v2)
+# ---------------------------------------------------------------------------
+
+STAGNATION_GUIDANCE_TEMPLATE = (
+    "## Stagnation Report\n"
+    "\n"
+    "**Level:** {stagnation_level}\n"
+    "**Iterations without improvement:** {iterations_stagnant}\n"
+    "**Best score:** {best_score:.4f}\n"
+    "\n"
+    "### Diagnosis\n"
+    "{diagnosis}\n"
+    "\n"
+    "### Recommendations\n"
+    "{recommendations}\n"
+    "\n"
+    "### Strategy\n"
+    "{strategy_guidance}\n"
+    "\n"
+    "{failed_approaches_section}"
+)
+
+CROSS_RUN_MEMORY_TEMPLATE = (
+    "## Cross-Run Memory\n"
+    "\n"
+    "The following learnings are from previous evolution runs on this or similar problems:\n"
+    "\n"
+    "{memory_content}\n"
+)
+
+RESEARCH_FINDINGS_TEMPLATE = (
+    "## Research Findings\n"
+    "\n"
+    "The following findings are from the research agent's investigation of the problem domain.\n"
+    "Consider these approaches and insights when generating your next candidate:\n"
+    "\n"
+    "{research_content}\n"
+)
+
+WARM_CACHE_TEMPLATE = (
+    "## Warm-Start Cache\n"
+    "\n"
+    "The following intermediate computation results are available from previous iterations.\n"
+    "Load them to avoid recomputing expensive state:\n"
+    "\n"
+    "{warm_cache_content}\n"
+)
+
+# ---------------------------------------------------------------------------
+# Solver-hybrid template (v2 Phase 3)
+# ---------------------------------------------------------------------------
+
+SOLVER_USER_TEMPLATE = (
+    "# Solver-Hybrid Mode\n"
+    "\n"
+    "Instead of directly generating a solution, formulate the problem as a\n"
+    "constraint satisfaction problem that a solver can tackle.\n"
+    "\n"
+    "## Steps\n"
+    "1. Read the evaluator to understand the exact constraints\n"
+    "2. Express the constraints formally (SAT clauses, LP constraints, or CSP)\n"
+    "3. Use Python solver libraries: `pysat`, `z3-solver`, `scipy.optimize`, or `ortools`\n"
+    "4. Convert the solver's output back to the evaluator's expected format\n"
+    "\n"
+    "## Current Program Information\n"
+    "- Fitness: {fitness_score}\n"
+    "- Feature coordinates: {feature_coords}\n"
+    "- Focus areas: {improvement_areas}\n"
+    "\n"
+    "{artifacts}\n"
+    "\n"
+    "# Program Evolution History\n"
+    "{evolution_history}\n"
+    "\n"
+    "# Current Program\n"
+    "```{language}\n"
+    "{current_program}\n"
+    "```\n"
+    "\n"
+    "# Task\n"
+    "Reformulate this problem using constraint solvers. The system maintains diversity\n"
+    "across these dimensions: {feature_dimensions}\n"
+    "\n"
+    "IMPORTANT: Your solution must still match the evaluator's expected interface.\n"
+    "Use SEARCH/REPLACE format if modifying existing code, or provide the complete\n"
+    "rewritten program if starting fresh.\n"
+)
+
+DECOMPOSITION_USER_TEMPLATE = (
+    "# Problem Decomposition Mode\n"
+    "\n"
+    "Break this problem into independent sub-problems that can be optimized separately.\n"
+    "\n"
+    "## Steps\n"
+    "1. Identify the independent components of the problem\n"
+    "2. For each component, define a clear interface and objective\n"
+    "3. Optimize the most impactful component first\n"
+    "4. Combine optimized components into the final solution\n"
+    "\n"
+    "## Current Program Information\n"
+    "- Fitness: {fitness_score}\n"
+    "- Feature coordinates: {feature_coords}\n"
+    "- Focus areas: {improvement_areas}\n"
+    "\n"
+    "{artifacts}\n"
+    "\n"
+    "# Program Evolution History\n"
+    "{evolution_history}\n"
+    "\n"
+    "# Current Program\n"
+    "```{language}\n"
+    "{current_program}\n"
+    "```\n"
+    "\n"
+    "# Task\n"
+    "Decompose the problem and optimize each component. Then combine.\n"
+    "The system maintains diversity across: {feature_dimensions}\n"
+)
+
 # Inline fallback lookup used when files are unavailable
 _INLINE_DEFAULTS: Dict[str, str] = {
     "system_message": BASE_SYSTEM_TEMPLATE,
@@ -187,6 +307,12 @@ _INLINE_DEFAULTS: Dict[str, str] = {
     "inspirations_section": INSPIRATIONS_SECTION_TEMPLATE,
     "inspiration_program": INSPIRATION_PROGRAM_TEMPLATE,
     "evaluation": EVALUATION_TEMPLATE,
+    "stagnation_guidance": STAGNATION_GUIDANCE_TEMPLATE,
+    "cross_run_memory": CROSS_RUN_MEMORY_TEMPLATE,
+    "research_findings": RESEARCH_FINDINGS_TEMPLATE,
+    "warm_cache": WARM_CACHE_TEMPLATE,
+    "solver_user": SOLVER_USER_TEMPLATE,
+    "decomposition_user": DECOMPOSITION_USER_TEMPLATE,
 }
 
 # Inline fallback fragments
@@ -249,6 +375,67 @@ _INLINE_FRAGMENTS: Dict[str, str] = {
     "inspiration_code_with_concise_line": "Concise implementation",
     "inspiration_code_with_comprehensive_line": "Comprehensive implementation",
     "inspiration_no_features_postfix": "{program_type} approach to the problem",
+    # Stagnation-aware fragments (v2)
+    "stagnation_none": "No stagnation detected. Continue optimizing normally.",
+    "stagnation_mild": (
+        "MILD stagnation detected ({iterations} iterations without improvement). "
+        "Increase exploration: try approaches you haven't attempted yet. "
+        "Look at inspiration programs for ideas."
+    ),
+    "stagnation_moderate": (
+        "MODERATE stagnation detected ({iterations} iterations without improvement). "
+        "Time for a PARADIGM SHIFT. The current approach has likely hit a local optimum. "
+        "Consider a fundamentally different algorithm or technique. "
+        "Spawn a researcher agent to find new approaches via literature search."
+    ),
+    "stagnation_severe": (
+        "SEVERE stagnation detected ({iterations} iterations without improvement). "
+        "RADICAL DEPARTURE needed. Completely abandon the current approach family. "
+        "Search for theoretical bounds. Try unconventional techniques from other domains. "
+        "Spawn a diagnostician agent to analyze root causes."
+    ),
+    "stagnation_critical": (
+        "CRITICAL stagnation ({iterations} iterations without improvement). "
+        "FULL RESTART warranted. Start from a completely different seed approach. "
+        "Re-examine whether the problem formulation is correct. "
+        "Check if the evaluator has subtle requirements being missed. "
+        "Report honestly if the target appears unreachable."
+    ),
+    "stagnation_failed_approaches_header": "### Failed Approaches (Do NOT Retry These)\n",
+    "stagnation_failed_approach_item": "- {approach}",
+    "strategy_standard": "Continue with targeted improvements to the current approach.",
+    "strategy_diversify": (
+        "Increase diversity: try a different algorithmic family, "
+        "data structure, or optimization technique."
+    ),
+    "strategy_paradigm_shift": (
+        "Paradigm shift: abandon incremental improvements. "
+        "Research the problem domain for fundamentally different approaches. "
+        "Consider techniques from adjacent fields."
+    ),
+    "strategy_radical_departure": (
+        "Radical departure: the current solution family is exhausted. "
+        "Start from first principles. What would an expert in this domain do differently? "
+        "Consider mathematical reformulations, constraint relaxations, or hybrid solvers."
+    ),
+    "strategy_full_restart": (
+        "Full restart: discard all assumptions from the current approach. "
+        "Re-read the evaluator from scratch. Consider whether the problem "
+        "can be decomposed into sub-problems. Search for theoretical results "
+        "that bound what is achievable."
+    ),
+    # Strategy evolver fragments (v2 Phase 3)
+    "strategy_directive_header": "## Strategy Directive",
+    "strategy_incremental": "Focus on small, targeted improvements to the current best solution.",
+    "strategy_creative_leap": "Completely ignore the current approach. Try something fundamentally different.",
+    "strategy_hybrid_synthesis": "Combine the best elements from multiple top-performing solutions.",
+    "strategy_research_driven": "Spend most effort on research before implementing. Find the state-of-the-art.",
+    "strategy_solver_hybrid": "Formulate this as a constraint satisfaction problem and use formal solvers.",
+    "eval_cache_hint": (
+        "OPTIMIZATION: Results for n<=42 are deterministic with Exoo(42). "
+        "Use the warm cache to store verified results and skip re-evaluation. "
+        "This frees up ~50s of eval budget for frontier optimization."
+    ),
 }
 
 

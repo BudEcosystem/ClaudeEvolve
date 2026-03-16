@@ -82,6 +82,7 @@ class StateManager:
         initial_content: str,
         artifact_type: str = "python",
         evaluator_path: Optional[str] = None,
+        fresh: bool = True,
     ) -> None:
         """Create the state directory and seed the database.
 
@@ -91,7 +92,27 @@ class StateManager:
             artifact_type: Type of artifact (``python``, ``javascript``, etc.).
             evaluator_path: Optional path to the evaluator script (stored
                 in config metadata but not used directly here).
+            fresh: If True (default), clear the entire state directory before
+                initializing. This prevents contamination from previous runs
+                (stale database, warm cache, strategies, eval cache).
         """
+        if fresh and os.path.exists(self.state_dir):
+            import shutil
+            # Preserve cross_run_memory if it exists (it's meant to persist)
+            crm_dir = os.path.join(self.state_dir, "cross_run_memory")
+            crm_backup = None
+            if os.path.exists(crm_dir):
+                crm_backup = crm_dir + ".bak"
+                shutil.move(crm_dir, crm_backup)
+
+            # Clear everything else
+            shutil.rmtree(self.state_dir)
+
+            # Restore cross_run_memory
+            os.makedirs(self.state_dir, exist_ok=True)
+            if crm_backup and os.path.exists(crm_backup):
+                shutil.move(crm_backup, crm_dir)
+
         os.makedirs(self.state_dir, exist_ok=True)
         os.makedirs(os.path.join(self.state_dir, "checkpoints"), exist_ok=True)
 

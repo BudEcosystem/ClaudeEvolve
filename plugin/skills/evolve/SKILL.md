@@ -135,6 +135,105 @@ After submitting:
 
 Do NOT try to manually loop or run another iteration. The stop hook handles iteration progression automatically.
 
+## Stagnation-Aware Evolution (v2)
+
+The evolution system now includes stagnation detection. When stagnation is detected, the iteration context will include a **Stagnation Report** section with:
+
+- **Stagnation Level**: NONE, MILD, MODERATE, SEVERE, or CRITICAL
+- **Iterations Stagnant**: How many iterations since the last improvement
+- **Suggested Strategy**: The system's recommendation for breaking through
+- **Failed Approaches**: Approaches already tried that didn't help
+- **Recommendations**: Specific actions to take
+
+### Responding to Stagnation Levels
+
+**NONE**: Business as usual. Follow the standard iteration protocol.
+
+**MILD** (3-5 iterations stagnant): Increase exploration. Try approaches you haven't tried yet. Look at inspiration programs more carefully.
+
+**MODERATE** (6-10 iterations stagnant): Time for a paradigm shift. The current approach has likely hit a local optimum. Consider:
+- Spawning a **researcher agent** to find new approaches via literature search
+- Trying a fundamentally different algorithm or technique
+- Combining elements from diverse inspiration programs
+
+**SEVERE** (11-20 iterations stagnant): Radical departure needed. Consider:
+- Spawning a **diagnostician agent** to analyze root causes
+- Completely abandoning the current approach family
+- Searching for theoretical bounds to understand if the target is achievable
+- Trying unconventional techniques from other domains
+
+**CRITICAL** (20+ iterations stagnant): Full restart warranted. Consider:
+- Starting from a completely different seed approach
+- Re-examining whether the problem formulation is correct
+- Checking if the evaluator has subtle requirements being missed
+- Reporting honestly if the target appears unreachable
+
+### Cross-Run Memory
+
+If the system has memory from previous evolution runs, you'll see a **Cross-Run Memory** section in the iteration context with:
+- **Failed Approaches**: Things that didn't work in previous runs (avoid these)
+- **Successful Strategies**: Techniques that worked well before (build on these)
+- **Key Insights**: Learnings from prior runs
+
+Use this information to avoid repeating past mistakes and build on proven strategies.
+
+### Warm-Start Cache
+
+The evolution system provides a **warm cache** for persisting intermediate computation results between iterations. This is essential for problems where:
+- Each iteration recomputes expensive intermediate state (adjacency matrices, model checkpoints, etc.)
+- Search is incremental (SA, tabu search, genetic algorithms)
+- You want to accumulate computation across multiple iterations
+
+**How to use in your candidate:**
+
+```python
+# Save to warm cache (at end of your iteration)
+import subprocess, json, numpy as np
+np.save('/tmp/my_result.npy', my_matrix)
+subprocess.run(['claude-evolve', 'cache-put', '--state-dir', '.claude/evolve-state',
+                '--key', 'best_matrix', '--file', '/tmp/my_result.npy',
+                '--type', 'numpy', '--description', 'Best K_43 adjacency matrix',
+                '--score', str(my_score)])
+
+# Load from warm cache (at start of your iteration)
+import os
+cache_file = '.claude/evolve-state/warm_cache/items/best_matrix.npy'
+if os.path.exists(cache_file):
+    prev_best = np.load(cache_file)
+    # Continue optimizing from prev_best instead of recomputing
+```
+
+**Multi-Iteration Accumulation:**
+When the strategy directive says "Multi-Iteration Accumulation", follow this pattern:
+1. Load previous best from warm cache
+2. Run additional optimization (SA iterations, search steps, etc.)
+3. Save improved result back to warm cache
+4. Submit the improved candidate
+
+This lets you accumulate thousands of SA iterations across hundreds of evolution iterations, far exceeding what a single 300s eval budget allows.
+
+### Problem Type Guidance
+
+**Quantitative Problems (Math, Optimization, Algorithms):**
+- Focus on algorithmic correctness first, then optimize
+- Use warm cache for expensive intermediate computations
+- Multi-iteration accumulation is highly effective
+- Tabu search often outperforms SA for discrete optimization
+- Consider constraint propagation and SAT encoding for combinatorial problems
+
+**Qualitative Problems (Business, Writing, Design):**
+- Focus on structure and clarity in early iterations
+- Use research agent for domain knowledge
+- Iterate on specific sections rather than full rewrites
+- Cross-run memory is especially valuable for maintaining style consistency
+- Decomposition strategy works well: separate structure from content
+
+**Hybrid Problems (Data Science, ML, Simulation):**
+- Warm cache for model checkpoints and preprocessed data
+- Multi-iteration accumulation for hyperparameter search
+- Research agent for SOTA techniques and benchmarks
+- Problem decomposition: separate data prep, model selection, tuning
+
 ## Advanced Techniques
 
 ### Ralph Loop Within Evolution
