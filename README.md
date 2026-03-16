@@ -131,10 +131,10 @@ Each iteration, Claude receives **different context** — a new parent artifact 
 
 Claude Evolve is a three-layer hybrid system:
 
-```
+
 <img width="1440" height="1524" alt="image" src="https://github.com/user-attachments/assets/0719899d-2d6d-4407-a1d4-3c032e329d10" />
 
-```
+
 
 **Layer 1 (Shell)** manages the iteration lifecycle. The stop hook calls `diagnose` (stagnation detection) before `next` (context generation).
 
