@@ -1029,5 +1029,132 @@ class TestContextBuilderChangesDescription(unittest.TestCase):
         self.assertIn("Added loop optimization", ctx["prompt"])
 
 
+class TestContextBuilderPairwiseComparison(unittest.TestCase):
+    """Test pairwise comparison (verbal gradient) rendering."""
+
+    def setUp(self):
+        self.builder = ContextBuilder(PromptConfig())
+        self.parent = Artifact(
+            id="p1",
+            content="def solve():\n    return 42",
+            artifact_type="python",
+            metrics={"combined_score": 0.8, "accuracy": 0.9},
+            generation=3,
+        )
+        self.comparison = Artifact(
+            id="comp-1",
+            content="def solve():\n    return sum(range(10))",
+            artifact_type="python",
+            metrics={"combined_score": 0.5, "accuracy": 0.6},
+            generation=2,
+        )
+
+    def test_comparison_artifact_in_rendered_context(self):
+        """When comparison_artifact is provided, both parent and comparison rendered."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=5,
+            best_score=0.8,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            comparison_artifact=self.comparison,
+            comparison_score=0.5,
+        )
+        md = self.builder.render_iteration_context(
+            ctx, iteration=5, max_iterations=30
+        )
+        self.assertIn("Pairwise Comparison (Verbal Gradient)", md)
+        self.assertIn("0.8000", md)  # parent score
+        self.assertIn("0.5000", md)  # comparison score
+        self.assertIn("sum(range(10))", md)  # comparison content snippet
+
+    def test_comparison_section_absent_without_comparison(self):
+        """Without comparison_artifact, no pairwise section appears."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=5,
+            best_score=0.8,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+        )
+        md = self.builder.render_iteration_context(
+            ctx, iteration=5, max_iterations=30
+        )
+        self.assertNotIn("Pairwise Comparison", md)
+
+    def test_comparison_metadata_stored(self):
+        """Comparison data should be in the context metadata."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=5,
+            best_score=0.8,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            comparison_artifact=self.comparison,
+            comparison_score=0.5,
+        )
+        meta = ctx["metadata"]
+        self.assertIn("comparison_artifact_content", meta)
+        self.assertIn("comparison_score", meta)
+        self.assertAlmostEqual(meta["comparison_score"], 0.5)
+        self.assertIn("sum(range(10))", meta["comparison_artifact_content"])
+
+    def test_comparison_with_dict_artifact(self):
+        """Comparison should also work when passed as a dict."""
+        comp_dict = {
+            "id": "comp-dict",
+            "content": "def alternative(): return 99",
+            "metrics": {"combined_score": 0.3},
+        }
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=2,
+            best_score=0.8,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            comparison_artifact=comp_dict,
+            comparison_score=0.3,
+        )
+        md = self.builder.render_iteration_context(
+            ctx, iteration=2, max_iterations=30
+        )
+        self.assertIn("Pairwise Comparison", md)
+        self.assertIn("alternative", md)
+
+    def test_comparison_content_truncated_to_500_chars(self):
+        """Long comparison content should be truncated to 500 chars."""
+        long_content = "x = 1\n" * 200  # ~1200 chars
+        comp = Artifact(
+            id="comp-long",
+            content=long_content,
+            artifact_type="python",
+            metrics={"combined_score": 0.4},
+        )
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=1,
+            best_score=0.8,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            comparison_artifact=comp,
+            comparison_score=0.4,
+        )
+        md = self.builder.render_iteration_context(
+            ctx, iteration=1, max_iterations=30
+        )
+        self.assertIn("Pairwise Comparison", md)
+        # The snippet in the rendered markdown should be at most 500 chars
+        # Find the comparison code block
+        idx = md.index("### Comparison Program")
+        snippet_section = md[idx:idx+700]
+        # The actual content between ``` markers should be <= 500 chars
+        self.assertIn("x = 1", snippet_section)
+
+
 if __name__ == "__main__":
     unittest.main()

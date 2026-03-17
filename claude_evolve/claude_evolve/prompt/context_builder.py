@@ -87,6 +87,10 @@ class ContextBuilder:
         strategy_text: Optional[str] = None,
         warm_cache_text: Optional[str] = None,
         stepping_stones_text: Optional[str] = None,
+        comparison_artifact: Optional[Any] = None,
+        comparison_score: float = 0.0,
+        failures_text: Optional[str] = None,
+        evaluator_source: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Build the full context dict for one evolution iteration.
@@ -121,6 +125,18 @@ class ContextBuilder:
             warm_cache_text: Optional pre-formatted text from
                 WarmCache.format_for_prompt(). When present,
                 warm-start cache info is injected into the prompt.
+            comparison_artifact: Optional artifact (or dict) to use
+                for pairwise comparison (verbal gradient). When
+                provided along with comparison_score, a "Pairwise
+                Comparison" section is rendered showing both parent
+                and comparison code snippets with scores.
+            comparison_score: Fitness score of the comparison artifact.
+            failures_text: Optional pre-formatted text of recent
+                failures. When present, failure reflexion is injected
+                into the prompt so the LLM avoids repeating mistakes.
+            evaluator_source: Optional source code of the evaluator
+                script (first 200 lines). When present, it is shown
+                to the LLM so it can understand how candidates are scored.
             **kwargs: Extra keys forwarded into the user template.
 
         Returns:
@@ -257,6 +273,21 @@ class ContextBuilder:
         if stepping_stones_text:
             metadata["stepping_stones_text"] = stepping_stones_text
 
+        # Pairwise comparison (verbal gradient)
+        if comparison_artifact is not None:
+            comp_dict = self._normalize_parent(comparison_artifact)
+            comp_content = comp_dict.get("content", comp_dict.get("code", ""))
+            metadata["comparison_artifact_content"] = comp_content
+            metadata["comparison_score"] = comparison_score
+
+        # Recent failures for reflexion
+        if failures_text:
+            metadata["failures_text"] = failures_text
+
+        # Evaluator source code for scoring context
+        if evaluator_source:
+            metadata["evaluator_source"] = evaluator_source
+
         return {
             "prompt": user_message,
             "system_message": system_message,
@@ -352,6 +383,24 @@ class ContextBuilder:
         stepping_stones_text = metadata.get("stepping_stones_text")
         if stepping_stones_text:
             lines.append(stepping_stones_text)
+            lines.append("")
+
+        # Pairwise comparison (verbal gradient)
+        comparison_content = metadata.get("comparison_artifact_content")
+        if comparison_content is not None:
+            comparison_score = metadata.get("comparison_score", 0.0)
+            parent_score_val = parent_metrics.get("combined_score", 0.0)
+            lines.append("## Pairwise Comparison (Verbal Gradient)")
+            lines.append("")
+            lines.append(
+                f"The parent (score {parent_score_val:.4f}) and this comparison "
+                f"(score {comparison_score:.4f}) differ in their approach. "
+                f"Consider what makes the higher-scoring one better."
+            )
+            lines.append("")
+            lines.append("### Comparison Program")
+            snippet = comparison_content[:500]
+            lines.append(f"```\n{snippet}\n```")
             lines.append("")
 
         # Embed the full prompt
