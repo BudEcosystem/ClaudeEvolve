@@ -304,6 +304,62 @@ class DiagnosticsConfig:
 
 
 @dataclass
+class ImprovementSignalConfig:
+    """Configuration for the continuous improvement signal (G_t).
+
+    Controls the exponential moving average that tracks improvement
+    momentum, exploration intensity bounds, and the meta-threshold
+    for triggering strategy switches.
+    """
+
+    enabled: bool = True
+    rho: float = 0.95
+    i_min: float = 0.1
+    i_max: float = 0.7
+    meta_threshold: float = 0.12
+
+
+@dataclass
+class SelectionConfig:
+    """Configuration for strategy and parent selection.
+
+    Controls the UCB1 bandit for strategy selection, parent selection
+    method, and the novelty gate threshold.
+    """
+
+    strategy_selection: str = "ucb1"
+    ucb_c: float = 1.414
+    ucb_decay: float = 0.95
+    parent_selection: str = "power_law"
+    novelty_gate_min_novelty: float = 0.05
+
+
+@dataclass
+class ScratchpadConfig:
+    """Configuration for the meta-scratchpad.
+
+    Controls periodic pattern synthesis from evolution history.
+    """
+
+    enabled: bool = True
+    synthesis_interval: int = 10
+
+
+@dataclass
+class ReflectionConfig:
+    """Configuration for the reflection engine.
+
+    Controls short/long-term reflection using semantic fingerprint
+    diffs, including how many short reflections to keep and how
+    often to synthesize long reflections.
+    """
+
+    enabled: bool = True
+    max_short_reflections: int = 20
+    synthesis_interval: int = 5
+
+
+@dataclass
 class Config:
     """Master configuration for claude_evolve.
 
@@ -336,6 +392,12 @@ class Config:
     cross_run_memory: CrossRunMemoryConfig = field(default_factory=CrossRunMemoryConfig)
     research: ResearchConfig = field(default_factory=ResearchConfig)
     diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
+    improvement_signal: ImprovementSignalConfig = field(
+        default_factory=ImprovementSignalConfig
+    )
+    selection: SelectionConfig = field(default_factory=SelectionConfig)
+    scratchpad: ScratchpadConfig = field(default_factory=ScratchpadConfig)
+    reflection: ReflectionConfig = field(default_factory=ReflectionConfig)
 
     # Early stopping settings
     early_stopping_patience: Optional[int] = None

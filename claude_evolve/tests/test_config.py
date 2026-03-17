@@ -8,10 +8,14 @@ from claude_evolve.config import (
     DatabaseConfig,
     DiagnosticsConfig,
     EvaluatorConfig,
+    ImprovementSignalConfig,
     PromptConfig,
     EvolutionConfig,
     EvolutionTraceConfig,
+    ReflectionConfig,
     ResearchConfig,
+    ScratchpadConfig,
+    SelectionConfig,
     StagnationConfig,
     load_config,
     _resolve_env_vars,
@@ -260,6 +264,78 @@ class TestDiagnosticsConfig(unittest.TestCase):
         self.assertEqual(c.diagnostic_report_file, "custom_diagnostic.json")
 
 
+class TestImprovementSignalConfig(unittest.TestCase):
+    def test_defaults(self):
+        c = ImprovementSignalConfig()
+        self.assertTrue(c.enabled)
+        self.assertAlmostEqual(c.rho, 0.95)
+        self.assertAlmostEqual(c.i_min, 0.1)
+        self.assertAlmostEqual(c.i_max, 0.7)
+        self.assertAlmostEqual(c.meta_threshold, 0.12)
+
+    def test_custom_values(self):
+        c = ImprovementSignalConfig(
+            enabled=False, rho=0.9, i_min=0.05, i_max=0.8, meta_threshold=0.2
+        )
+        self.assertFalse(c.enabled)
+        self.assertAlmostEqual(c.rho, 0.9)
+        self.assertAlmostEqual(c.i_min, 0.05)
+        self.assertAlmostEqual(c.i_max, 0.8)
+        self.assertAlmostEqual(c.meta_threshold, 0.2)
+
+
+class TestSelectionConfig(unittest.TestCase):
+    def test_defaults(self):
+        c = SelectionConfig()
+        self.assertEqual(c.strategy_selection, "ucb1")
+        self.assertAlmostEqual(c.ucb_c, 1.414)
+        self.assertAlmostEqual(c.ucb_decay, 0.95)
+        self.assertEqual(c.parent_selection, "power_law")
+        self.assertAlmostEqual(c.novelty_gate_min_novelty, 0.05)
+
+    def test_custom_values(self):
+        c = SelectionConfig(
+            strategy_selection="random",
+            ucb_c=2.0,
+            ucb_decay=0.9,
+            parent_selection="tournament",
+            novelty_gate_min_novelty=0.1,
+        )
+        self.assertEqual(c.strategy_selection, "random")
+        self.assertAlmostEqual(c.ucb_c, 2.0)
+        self.assertAlmostEqual(c.ucb_decay, 0.9)
+        self.assertEqual(c.parent_selection, "tournament")
+        self.assertAlmostEqual(c.novelty_gate_min_novelty, 0.1)
+
+
+class TestScratchpadConfig(unittest.TestCase):
+    def test_defaults(self):
+        c = ScratchpadConfig()
+        self.assertTrue(c.enabled)
+        self.assertEqual(c.synthesis_interval, 10)
+
+    def test_custom_values(self):
+        c = ScratchpadConfig(enabled=False, synthesis_interval=20)
+        self.assertFalse(c.enabled)
+        self.assertEqual(c.synthesis_interval, 20)
+
+
+class TestReflectionConfig(unittest.TestCase):
+    def test_defaults(self):
+        c = ReflectionConfig()
+        self.assertTrue(c.enabled)
+        self.assertEqual(c.max_short_reflections, 20)
+        self.assertEqual(c.synthesis_interval, 5)
+
+    def test_custom_values(self):
+        c = ReflectionConfig(
+            enabled=False, max_short_reflections=50, synthesis_interval=10
+        )
+        self.assertFalse(c.enabled)
+        self.assertEqual(c.max_short_reflections, 50)
+        self.assertEqual(c.synthesis_interval, 10)
+
+
 class TestConfig(unittest.TestCase):
     def test_defaults(self):
         c = Config()
@@ -273,6 +349,10 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(c.cross_run_memory, CrossRunMemoryConfig)
         self.assertIsInstance(c.research, ResearchConfig)
         self.assertIsInstance(c.diagnostics, DiagnosticsConfig)
+        self.assertIsInstance(c.improvement_signal, ImprovementSignalConfig)
+        self.assertIsInstance(c.selection, SelectionConfig)
+        self.assertIsInstance(c.scratchpad, ScratchpadConfig)
+        self.assertIsInstance(c.reflection, ReflectionConfig)
         self.assertIsNone(c.target_score)
         self.assertEqual(c.artifact_type, "python")
         self.assertEqual(c.output_dir, "./evolve_output")
@@ -409,6 +489,121 @@ class TestConfig(unittest.TestCase):
         # Unspecified fields keep defaults
         self.assertTrue(c.diagnostics.persist_reports)
         self.assertEqual(c.diagnostics.diagnostic_report_file, "diagnostic_report.json")
+
+    def test_config_has_new_sections_with_correct_defaults(self):
+        """Config should include improvement_signal, selection, scratchpad, reflection."""
+        config = Config()
+        self.assertTrue(hasattr(config, "improvement_signal"))
+        self.assertTrue(hasattr(config, "selection"))
+        self.assertTrue(hasattr(config, "scratchpad"))
+        self.assertTrue(hasattr(config, "reflection"))
+        self.assertAlmostEqual(config.improvement_signal.rho, 0.95)
+        self.assertEqual(config.selection.strategy_selection, "ucb1")
+        self.assertEqual(config.scratchpad.synthesis_interval, 10)
+        self.assertEqual(config.reflection.max_short_reflections, 20)
+
+    def test_from_dict_improvement_signal_overrides(self):
+        d = {"improvement_signal": {"rho": 0.9, "i_min": 0.05, "enabled": False}}
+        c = Config.from_dict(d)
+        self.assertAlmostEqual(c.improvement_signal.rho, 0.9)
+        self.assertAlmostEqual(c.improvement_signal.i_min, 0.05)
+        self.assertFalse(c.improvement_signal.enabled)
+        # Unspecified fields keep defaults
+        self.assertAlmostEqual(c.improvement_signal.i_max, 0.7)
+        self.assertAlmostEqual(c.improvement_signal.meta_threshold, 0.12)
+
+    def test_from_dict_selection_overrides(self):
+        d = {"selection": {"ucb_c": 2.0, "parent_selection": "tournament"}}
+        c = Config.from_dict(d)
+        self.assertAlmostEqual(c.selection.ucb_c, 2.0)
+        self.assertEqual(c.selection.parent_selection, "tournament")
+        # Unspecified fields keep defaults
+        self.assertEqual(c.selection.strategy_selection, "ucb1")
+        self.assertAlmostEqual(c.selection.ucb_decay, 0.95)
+        self.assertAlmostEqual(c.selection.novelty_gate_min_novelty, 0.05)
+
+    def test_from_dict_scratchpad_overrides(self):
+        d = {"scratchpad": {"enabled": False, "synthesis_interval": 20}}
+        c = Config.from_dict(d)
+        self.assertFalse(c.scratchpad.enabled)
+        self.assertEqual(c.scratchpad.synthesis_interval, 20)
+
+    def test_from_dict_reflection_overrides(self):
+        d = {"reflection": {"max_short_reflections": 50, "synthesis_interval": 10}}
+        c = Config.from_dict(d)
+        self.assertEqual(c.reflection.max_short_reflections, 50)
+        self.assertEqual(c.reflection.synthesis_interval, 10)
+        # Unspecified fields keep defaults
+        self.assertTrue(c.reflection.enabled)
+
+    def test_from_dict_with_multiple_new_sections(self):
+        """Config.from_dict should deserialize multiple new sections at once."""
+        d = {
+            "improvement_signal": {"rho": 0.9},
+            "selection": {"ucb_c": 2.0},
+            "scratchpad": {"synthesis_interval": 15},
+            "reflection": {"max_short_reflections": 30},
+        }
+        c = Config.from_dict(d)
+        self.assertAlmostEqual(c.improvement_signal.rho, 0.9)
+        self.assertAlmostEqual(c.selection.ucb_c, 2.0)
+        self.assertEqual(c.scratchpad.synthesis_interval, 15)
+        self.assertEqual(c.reflection.max_short_reflections, 30)
+
+    def test_to_dict_includes_new_sections(self):
+        c = Config()
+        d = c.to_dict()
+        self.assertIn("improvement_signal", d)
+        self.assertIn("selection", d)
+        self.assertIn("scratchpad", d)
+        self.assertIn("reflection", d)
+        self.assertAlmostEqual(d["improvement_signal"]["rho"], 0.95)
+        self.assertTrue(d["improvement_signal"]["enabled"])
+        self.assertEqual(d["selection"]["strategy_selection"], "ucb1")
+        self.assertAlmostEqual(d["selection"]["ucb_c"], 1.414)
+        self.assertTrue(d["scratchpad"]["enabled"])
+        self.assertEqual(d["scratchpad"]["synthesis_interval"], 10)
+        self.assertTrue(d["reflection"]["enabled"])
+        self.assertEqual(d["reflection"]["max_short_reflections"], 20)
+        self.assertEqual(d["reflection"]["synthesis_interval"], 5)
+
+    def test_to_dict_from_dict_roundtrip_new_sections(self):
+        """to_dict -> from_dict should preserve new section values."""
+        c = Config(
+            improvement_signal=ImprovementSignalConfig(rho=0.8, i_min=0.2),
+            selection=SelectionConfig(ucb_c=3.0, parent_selection="tournament"),
+            scratchpad=ScratchpadConfig(enabled=False, synthesis_interval=25),
+            reflection=ReflectionConfig(max_short_reflections=40, synthesis_interval=8),
+        )
+        d = c.to_dict()
+        c2 = Config.from_dict(d)
+        self.assertAlmostEqual(c2.improvement_signal.rho, 0.8)
+        self.assertAlmostEqual(c2.improvement_signal.i_min, 0.2)
+        self.assertAlmostEqual(c2.selection.ucb_c, 3.0)
+        self.assertEqual(c2.selection.parent_selection, "tournament")
+        self.assertFalse(c2.scratchpad.enabled)
+        self.assertEqual(c2.scratchpad.synthesis_interval, 25)
+        self.assertEqual(c2.reflection.max_short_reflections, 40)
+        self.assertEqual(c2.reflection.synthesis_interval, 8)
+
+    def test_yaml_roundtrip_with_new_sections(self):
+        """YAML save/load should preserve new section values."""
+        c = Config(
+            improvement_signal=ImprovementSignalConfig(rho=0.85),
+            selection=SelectionConfig(ucb_c=2.5),
+            scratchpad=ScratchpadConfig(synthesis_interval=15),
+            reflection=ReflectionConfig(max_short_reflections=30),
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            c.to_yaml(f.name)
+            c2 = Config.from_yaml(f.name)
+        os.unlink(f.name)
+        self.assertAlmostEqual(c2.improvement_signal.rho, 0.85)
+        self.assertAlmostEqual(c2.selection.ucb_c, 2.5)
+        self.assertEqual(c2.scratchpad.synthesis_interval, 15)
+        self.assertEqual(c2.reflection.max_short_reflections, 30)
 
     def test_yaml_roundtrip_with_new_configs(self):
         c = Config(
