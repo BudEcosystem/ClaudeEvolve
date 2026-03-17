@@ -92,6 +92,9 @@ class ContextBuilder:
         failures_text: Optional[str] = None,
         evaluator_source: Optional[str] = None,
         parent_rationale: Optional[str] = None,
+        scratchpad_text: Optional[str] = None,
+        reflection_text: Optional[str] = None,
+        meta_guidance: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Build the full context dict for one evolution iteration.
@@ -142,6 +145,15 @@ class ContextBuilder:
                 artifact explaining its approach. When present, a
                 rationale section is rendered in the prompt guiding
                 the LLM to continue thought-code coevolution.
+            scratchpad_text: Optional accumulated insights from the
+                MetaScratchpad. When present, rendered as a
+                "Meta-Scratchpad" section in the prompt.
+            reflection_text: Optional pre-formatted reflection text
+                from ReflectionEngine.format_for_prompt(). Rendered
+                as-is (already includes ## headers).
+            meta_guidance: Optional meta-guidance text from the
+                orchestrator. Rendered as-is when present (already
+                includes ## header).
             **kwargs: Extra keys forwarded into the user template.
 
         Returns:
@@ -297,6 +309,18 @@ class ContextBuilder:
         if parent_rationale:
             metadata["parent_rationale"] = parent_rationale
 
+        # Meta-scratchpad accumulated insights
+        if scratchpad_text:
+            metadata["scratchpad_text"] = scratchpad_text
+
+        # Reflection engine output (short/long reflections)
+        if reflection_text:
+            metadata["reflection_text"] = reflection_text
+
+        # Meta-guidance (breakthrough required signal)
+        if meta_guidance:
+            metadata["meta_guidance"] = meta_guidance
+
         return {
             "prompt": user_message,
             "system_message": system_message,
@@ -433,6 +457,25 @@ class ContextBuilder:
                 "rationale_section"
             )
             lines.append(rationale_template.format(rationale=parent_rationale))
+            lines.append("")
+
+        # Meta-scratchpad accumulated insights
+        scratchpad_text = metadata.get("scratchpad_text")
+        if scratchpad_text:
+            lines.append("## Meta-Scratchpad (Accumulated Insights)")
+            lines.append(scratchpad_text)
+            lines.append("")
+
+        # Reflection engine output (already has ## headers)
+        reflection_text = metadata.get("reflection_text")
+        if reflection_text:
+            lines.append(reflection_text)
+            lines.append("")
+
+        # Meta-guidance (already has ## header from orchestrator)
+        meta_guidance = metadata.get("meta_guidance")
+        if meta_guidance:
+            lines.append(meta_guidance)
             lines.append("")
 
         # Embed the full prompt

@@ -29,6 +29,7 @@ class ImprovementSignal:
         g_t = rho * g_t + (1 - rho) * delta
         """
         delta = max((child_score - parent_score) / max(parent_score, 1e-10), 0.0)
+        delta = min(delta, 10.0)  # Cap to prevent G_t explosion when parent_score ~0
         self.g_t = self.rho * self.g_t + (1 - self.rho) * delta
 
         # Per-island signal

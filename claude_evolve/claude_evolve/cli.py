@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from typing import Optional
@@ -240,12 +241,26 @@ def next(state_dir):
         click.echo(f"Max iterations ({config.max_iterations}) reached. No more iterations.", err=True)
         raise SystemExit(1)
 
-    # Sample parent + inspirations
-    try:
-        parent, inspirations = db.sample()
-    except Exception as e:
-        click.echo(f"Error sampling from database: {e}", err=True)
-        raise SystemExit(1)
+    # --- Orchestrator: unified next-phase logic ---
+    from claude_evolve.core.orchestrator import IterationOrchestrator
+    orch = IterationOrchestrator(state_dir=state_dir, config=config, db=db)
+    orch_ctx = orch.prepare_next_iteration(iteration=next_iteration)
+
+    parent = orch_ctx['parent']
+
+    # Fall back to db.sample() when orchestrator returns no parent (empty db edge case)
+    if parent is None:
+        try:
+            parent, inspirations = db.sample()
+        except Exception as e:
+            click.echo(f"Error sampling from database: {e}", err=True)
+            raise SystemExit(1)
+    else:
+        # Get inspirations via db.sample() -- orchestrator handles parent selection
+        try:
+            _unused_parent, inspirations = db.sample()
+        except Exception:
+            inspirations = []
 
     # Get top programs and previous programs (recent artifacts sorted by iteration)
     top_programs = db.get_top_programs(n=config.prompt.num_top_programs)
@@ -276,7 +291,7 @@ def next(state_dir):
     if best is not None:
         best_score = best.metrics.get("combined_score", 0.0)
 
-    # Stagnation detection (v2)
+    # Stagnation detection (v2) -- use orchestrator's stagnation_level
     stagnation_report = None
     if config.stagnation.enabled:
         stagnation_report = db.detect_stagnation(config.stagnation)
@@ -307,16 +322,8 @@ def next(state_dir):
         if research_log.should_research(db.last_iteration + 1, stagnation_level_str, config.research):
             research_text = research_log.format_for_prompt()
 
-    # Strategy selection (v2 phase 3)
-    strategy_text = None
-    stagnation_level_str = stagnation_report.level.value if stagnation_report else "none"
-    strategies_path = os.path.join(state_dir, "strategies.json")
-    from claude_evolve.core.strategy import StrategyManager
-    strategy_mgr = StrategyManager(strategies_path)
-    strategy_mgr.load()
-    selected_strategy = strategy_mgr.select_strategy(stagnation_level_str)
-    strategy_text = strategy_mgr.format_for_prompt(selected_strategy)
-    strategy_mgr.save()
+    # Strategy text from orchestrator
+    strategy_text = orch_ctx['strategy_name']
 
     # Warm-start cache
     warm_cache_text = None
@@ -327,7 +334,7 @@ def next(state_dir):
         warm_cache.load()
         warm_cache_text = warm_cache.format_for_prompt()
 
-    # Stepping stones — diverse intermediate solutions for inspiration
+    # Stepping stones -- diverse intermediate solutions for inspiration
     stepping_stones_text = None
     stones_path = os.path.join(state_dir, "stepping_stones.json")
     if os.path.exists(stones_path):
@@ -343,22 +350,6 @@ def next(state_dir):
         except Exception:
             pass
 
-    # Recent failures for reflexion (avoid repeating past mistakes)
-    failures_text = None
-    failures_path = os.path.join(state_dir, "recent_failures.json")
-    if os.path.exists(failures_path):
-        try:
-            with open(failures_path, "r", encoding="utf-8") as f:
-                failures = json.load(f)
-            if failures:
-                lines = ["## Recent Failures (Avoid These)"]
-                for f_entry in failures:
-                    err = f_entry.get("error") or f"score dropped to {f_entry.get('score', '?')}"
-                    lines.append(f"- Approach: {f_entry.get('approach', '?')}. Result: {err}")
-                failures_text = "\n".join(lines)
-        except Exception:
-            pass
-
     # Load evaluator source so the LLM can see how candidates are scored
     evaluator_source = None
     evaluator_path = _find_evaluator_path(state_dir, config)
@@ -369,6 +360,9 @@ def next(state_dir):
             evaluator_source = "".join(evaluator_lines)
         except Exception:
             pass
+
+    # Extract parent rationale for thought-code coevolution
+    parent_rationale = parent.rationale if parent and hasattr(parent, 'rationale') else None
 
     ctx_builder = ContextBuilder(config.prompt)
     ctx = ctx_builder.build_context(
@@ -388,8 +382,13 @@ def next(state_dir):
         strategy_text=strategy_text,
         warm_cache_text=warm_cache_text if warm_cache_text else None,
         stepping_stones_text=stepping_stones_text if stepping_stones_text else None,
-        failures_text=failures_text if failures_text else None,
+        comparison_artifact=orch_ctx['comparison'],
+        failures_text=orch_ctx['failures_text'] if orch_ctx['failures_text'] else None,
         evaluator_source=evaluator_source if evaluator_source else None,
+        parent_rationale=parent_rationale,
+        scratchpad_text=orch_ctx['scratchpad_text'] if orch_ctx['scratchpad_text'] else None,
+        reflection_text=orch_ctx['reflection_text'] if orch_ctx['reflection_text'] else None,
+        meta_guidance=orch_ctx['meta_guidance'] if orch_ctx['meta_guidance'] else None,
     )
 
     # Render iteration context
@@ -399,23 +398,7 @@ def next(state_dir):
         max_iterations=config.max_iterations,
     )
 
-    # Write iteration manifest for submit to consume
-    iteration = db.last_iteration + 1
-    manifest_metadata_path = os.path.join(state_dir, "metadata.json")
-    manifest_run_id = "unknown"
-    if os.path.exists(manifest_metadata_path):
-        with open(manifest_metadata_path, "r") as f:
-            manifest_run_id = json.load(f).get("run_id", "unknown")
-    manifest = {
-        "iteration": iteration,
-        "run_id": manifest_run_id,
-        "selected_strategy_id": selected_strategy.id if selected_strategy else "unknown",
-        "parent_artifact_id": parent.id if parent else None,
-        "parent_score": parent.metrics.get("combined_score", 0.0) if parent else 0.0,
-        "parent_island_id": getattr(parent, "island_id", 0) if parent else 0,
-    }
-    with open(os.path.join(state_dir, "current_iteration.json"), "w") as f:
-        json.dump(manifest, f)
+    # Orchestrator already writes current_iteration.json via _save_manifest
 
     # Write to state dir
     sm.write_iteration_context(rendered)
@@ -818,6 +801,14 @@ def submit(candidate, state_dir, metrics):
     with open(candidate, "r") as f:
         candidate_content = f.read()
 
+    # Extract rationale for thought-code coevolution
+    # Supports optional comment prefixes (# // /* etc.) before markers
+    rationale_match = re.search(
+        r'RATIONALE-START\s*\n(.*?)\n[^\n]*RATIONALE-END',
+        candidate_content, re.DOTALL,
+    )
+    rationale = rationale_match.group(1).strip() if rationale_match else None
+
     # Pre-evaluation novelty gate — reject near-duplicates before
     # spending evaluator resources.  Skip when the archive is too
     # small (< 3 members) to make a meaningful comparison.
@@ -897,6 +888,8 @@ def submit(candidate, state_dir, metrics):
             "candidate_path": os.path.abspath(candidate),
         },
     )
+    # Attach extracted rationale for thought-code coevolution
+    new_artifact.rationale = rationale
 
     # Add to database
     current_iteration = db.last_iteration + 1
@@ -939,103 +932,19 @@ def submit(candidate, state_dir, metrics):
     except Exception:
         pass  # Non-critical — don't fail submit on stepping stone error
 
-    # Populate cross-run memory with outcome of this iteration
+    # --- Orchestrator: unified submit-phase logic ---
+    # Handles cross-run memory population, UCB strategy recording,
+    # failure capture, improvement signal update, and offspring tracking.
     try:
-        manifest_path = os.path.join(state_dir, "current_iteration.json")
-        manifest = {}
-        if os.path.exists(manifest_path):
-            with open(manifest_path, "r") as f:
-                manifest = json.load(f)
-
-        memory_dir = os.path.join(state_dir, config.cross_run_memory.memory_dir)
-        from claude_evolve.core.memory import CrossRunMemory
-        memory = CrossRunMemory(
-            memory_dir=memory_dir,
-            max_learnings=config.cross_run_memory.max_learnings,
-            max_failed_approaches=config.cross_run_memory.max_failed_approaches,
-        )
-        memory.load()
-
-        score = validated_metrics.get("combined_score", 0.0)
-        parent_score = manifest.get("parent_score", 0.0)
-        strategy_name = manifest.get("selected_strategy_id", "unknown")
-        run_id = manifest.get("run_id", "unknown")
-        manifest_iteration = manifest.get("iteration", current_iteration)
-
-        if score <= parent_score:
-            memory.add_failed_approach(
-                description=f"Strategy '{strategy_name}' on iteration {manifest_iteration}",
-                score=score,
-                iteration=manifest_iteration,
-                run_id=run_id,
-            )
-        else:
-            memory.add_strategy(
-                name=strategy_name,
-                description=f"Improved from {parent_score:.4f} to {score:.4f}",
-                score=score,
-                run_id=run_id,
-            )
-        memory.save()
+        from claude_evolve.core.orchestrator import IterationOrchestrator
+        orch = IterationOrchestrator(state_dir=state_dir, config=config, db=db)
+        # Merge raw error into metrics so orchestrator can see it
+        submit_metrics = dict(validated_metrics)
+        if raw_metrics is not None and raw_metrics.get("error"):
+            submit_metrics.setdefault("error", raw_metrics["error"])
+        orch.process_submission(candidate_content, submit_metrics)
     except Exception as e:
-        click.echo(f"Warning: Failed to populate cross-run memory: {e}", err=True)
-
-    # Record strategy outcome so the strategy manager can learn from results
-    try:
-        manifest_path = os.path.join(state_dir, "current_iteration.json")
-        if os.path.exists(manifest_path):
-            with open(manifest_path, "r") as f:
-                manifest = json.load(f)
-            strategy_id = manifest.get("selected_strategy_id")
-            parent_score = manifest.get("parent_score", 0.0)
-            if strategy_id:
-                strategies_path = os.path.join(state_dir, "strategies.json")
-                from claude_evolve.core.strategy import StrategyManager
-                strategy_mgr = StrategyManager(strategies_path)
-                strategy_mgr.load()
-                score = validated_metrics.get("combined_score", 0.0)
-                score_delta = score - parent_score
-                strategy_mgr.record_outcome(strategy_id, score_delta)
-                strategy_mgr.save()
-    except Exception as e:
-        click.echo(f"Warning: Failed to record strategy outcome: {e}", err=True)
-
-    # Capture failure for reflexion (circular buffer, max 5)
-    try:
-        manifest_path = os.path.join(state_dir, "current_iteration.json")
-        manifest = {}
-        if os.path.exists(manifest_path):
-            with open(manifest_path, "r") as f:
-                manifest = json.load(f)
-
-        score = validated_metrics.get("combined_score", 0.0)
-        parent_score = manifest.get("parent_score", 0.0)
-        strategy_name = manifest.get("selected_strategy_id", "unknown")
-        manifest_iteration = manifest.get("iteration", current_iteration)
-
-        # Check both validated and raw metrics for error (raw_metrics retains
-        # non-numeric fields like error strings that evaluate_with_metrics strips)
-        error_value = validated_metrics.get("error")
-        if error_value is None and raw_metrics is not None:
-            error_value = raw_metrics.get("error")
-        if score < parent_score * 0.95 or error_value:
-            failures_path = os.path.join(state_dir, "recent_failures.json")
-            failures = []
-            if os.path.exists(failures_path):
-                with open(failures_path, "r", encoding="utf-8") as f:
-                    failures = json.load(f)
-            failures.append({
-                "approach": strategy_name,
-                "error": error_value,
-                "score": score,
-                "parent_score": parent_score,
-                "iteration": manifest_iteration,
-            })
-            failures = failures[-5:]  # Circular buffer: keep only last 5
-            with open(failures_path, "w", encoding="utf-8") as f:
-                json.dump(failures, f)
-    except Exception as e:
-        click.echo(f"Warning: Failed to capture failure for reflexion: {e}", err=True)
+        click.echo(f"Warning: Orchestrator submit processing failed: {e}", err=True)
 
     # Save state
     sm.save()

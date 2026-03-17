@@ -71,14 +71,13 @@ class IterationOrchestrator:
 
         # Parent selection
         island_id = iteration % max(len(self.db.islands), 1)
+        parent = None
         if self.config.selection.parent_selection == "power_law":
             parent = self.db.select_parent_power_law(
                 island_id, ei, self.config.improvement_signal.i_max)
-        else:
-            if self.db.artifacts:
-                parent, _inspirations = self.db.sample()
-            else:
-                parent = None
+        # Fall back to db.sample() if power_law returned None (empty island)
+        if parent is None and self.db.artifacts:
+            parent, _inspirations = self.db.sample()
 
         # Comparison artifact for pairwise reflection
         comparison = None
