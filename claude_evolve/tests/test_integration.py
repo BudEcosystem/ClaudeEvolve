@@ -139,10 +139,15 @@ def pack_circles(n=10):
             result = self.runner.invoke(main, ["next", "--state-dir", self.state_dir])
             self.assertEqual(result.exit_code, 0)
 
-            # Submit with increasing scores
+            # Submit with increasing scores (each candidate is sufficiently distinct
+            # to pass the novelty gate)
+            algorithms = ["bubble_sort", "merge_sort", "quick_sort", "heap_sort", "radix_sort"]
             candidate = os.path.join(self.tmpdir, f"cand_{i}.py")
             with open(candidate, "w") as f:
-                f.write(f"# version {i}\nx = {i}")
+                f.write(f"# Approach: {algorithms[i]} implementation v{i}\n"
+                        f"import {['os','sys','math','json','re'][i]}\n"
+                        f"def {algorithms[i]}(data):\n"
+                        f"    return sorted(data, key=lambda x: x ** {i+1})\n")
             result = self.runner.invoke(main, [
                 "submit", "--candidate", candidate, "--state-dir", self.state_dir,
                 "--metrics", json.dumps({"combined_score": 0.5 + i * 0.1}),
