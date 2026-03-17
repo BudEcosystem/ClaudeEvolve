@@ -941,5 +941,137 @@ class TestCliStrategyOutcome(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
 
 
+class TestCliResearchTrigger(unittest.TestCase):
+    """Tests for research trigger gating in the next command."""
+
+    def setUp(self):
+        self.runner = CliRunner()
+        self.tmpdir = tempfile.mkdtemp()
+        self.artifact = os.path.join(self.tmpdir, "program.py")
+        with open(self.artifact, "w") as f:
+            f.write("def solve():\n    return 0\n")
+        self.evaluator = os.path.join(self.tmpdir, "evaluator.py")
+        with open(self.evaluator, "w") as f:
+            f.write(
+                'def evaluate(p):\n'
+                '    with open(p) as f: c = f.read()\n'
+                '    return {"combined_score": min(1.0, len(c) / 100.0)}\n'
+            )
+        self.state_dir = os.path.join(self.tmpdir, "state")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _init_with_research(self, trigger="on_stagnation"):
+        """Helper: init with research enabled and a given trigger."""
+        config_file = os.path.join(self.tmpdir, "config.yaml")
+        with open(config_file, "w") as f:
+            f.write(
+                f"max_iterations: 100\n"
+                f"research:\n"
+                f"  enabled: true\n"
+                f"  trigger: {trigger}\n"
+                f"  research_log_file: research_log.json\n"
+            )
+        result = self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--config", config_file,
+        ])
+        assert result.exit_code == 0, result.output
+
+    def _populate_research_log(self):
+        """Populate a research log with a finding so format_for_prompt() returns text."""
+        import time
+        log_path = os.path.join(self.state_dir, "research_log.json")
+        log_data = {
+            "findings": [
+                {
+                    "id": "test-finding-1",
+                    "iteration": 1,
+                    "timestamp": time.time(),
+                    "approach_name": "Test Approach XYZ",
+                    "description": "A test research approach for verification.",
+                    "novelty": "high",
+                    "implementation_hint": "Use technique XYZ.",
+                    "source_url": "",
+                    "was_tried": False,
+                    "outcome_score": None,
+                    "metadata": {},
+                }
+            ],
+            "theoretical_bounds": {},
+            "key_papers": [],
+            "approaches_to_avoid": [],
+        }
+        with open(log_path, "w") as f:
+            json.dump(log_data, f)
+
+    def test_next_excludes_research_when_no_stagnation(self):
+        """Research text should NOT appear when trigger is on_stagnation and stagnation is none."""
+        self._init_with_research(trigger="on_stagnation")
+        self._populate_research_log()
+
+        result = self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # The research finding text should NOT appear in the output
+        # because stagnation is "none" and trigger is "on_stagnation"
+        self.assertNotIn("Test Approach XYZ", result.output,
+                         "Research findings should be excluded when no stagnation")
+
+    def test_next_includes_research_when_trigger_always(self):
+        """Research text should appear when trigger is 'always'."""
+        self._init_with_research(trigger="always")
+        self._populate_research_log()
+
+        result = self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # The research finding text should appear in the output
+        self.assertIn("Test Approach XYZ", result.output,
+                      "Research findings should be included when trigger is 'always'")
+
+    def test_next_excludes_research_when_trigger_never(self):
+        """Research text should NOT appear when trigger is 'never'."""
+        self._init_with_research(trigger="never")
+        self._populate_research_log()
+
+        result = self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Test Approach XYZ", result.output,
+                         "Research findings should be excluded when trigger is 'never'")
+
+    def test_next_includes_research_on_periodic_at_interval(self):
+        """Research text should appear on periodic trigger at the right interval."""
+        config_file = os.path.join(self.tmpdir, "config.yaml")
+        with open(config_file, "w") as f:
+            f.write(
+                "max_iterations: 100\n"
+                "research:\n"
+                "  enabled: true\n"
+                "  trigger: periodic\n"
+                "  periodic_interval: 1\n"
+                "  research_log_file: research_log.json\n"
+            )
+        result = self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--config", config_file,
+        ])
+        assert result.exit_code == 0, result.output
+        self._populate_research_log()
+
+        result = self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # periodic_interval=1 means every iteration should trigger
+        self.assertIn("Test Approach XYZ", result.output,
+                      "Research findings should be included for periodic trigger")
+
+
 if __name__ == "__main__":
     unittest.main()

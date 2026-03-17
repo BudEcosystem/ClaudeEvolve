@@ -295,7 +295,7 @@ def next(state_dir):
             memory.load()
             cross_run_memory_text = memory.format_for_prompt()
 
-    # Research findings (v2 phase 2)
+    # Research findings (v2 phase 2) -- only include when trigger fires
     research_text = None
     if config.research.enabled:
         research_log_path = os.path.join(state_dir, config.research.research_log_file)
@@ -305,11 +305,7 @@ def next(state_dir):
 
         stagnation_level_str = stagnation_report.level.value if stagnation_report else "none"
         if research_log.should_research(db.last_iteration + 1, stagnation_level_str, config.research):
-            # Add a research trigger marker to metadata
-            # (The actual research agent is spawned by the SKILL.md guidance)
-            pass
-
-        research_text = research_log.format_for_prompt()
+            research_text = research_log.format_for_prompt()
 
     # Strategy selection (v2 phase 3)
     strategy_text = None
