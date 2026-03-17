@@ -547,5 +547,116 @@ def evaluate(artifact_path):
         shutil.rmtree(self.tmpdir)
 
 
+# ---------------------------------------------------------------------------
+# Evaluator Error Logging (Task 7)
+# ---------------------------------------------------------------------------
+class TestTimeoutLogsArtifactPath(unittest.TestCase):
+    """Timeout log message should include the artifact path being evaluated."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.slow_script = os.path.join(self.tmpdir, "slow_eval.py")
+        with open(self.slow_script, "w") as f:
+            f.write(
+                "import time\n"
+                "def evaluate(path):\n"
+                '    time.sleep(100)\n'
+                '    return {"combined_score": 1.0}\n'
+            )
+        self.candidate = os.path.join(self.tmpdir, "my_candidate.py")
+        with open(self.candidate, "w") as f:
+            f.write("x = 1\n")
+
+    def test_timeout_log_includes_artifact_path(self):
+        """The WARNING log on timeout should contain the candidate file path."""
+        import logging
+
+        config = EvaluatorConfig(mode="script", timeout=2, max_retries=0)
+        evaluator = Evaluator(config, self.slow_script)
+
+        with self.assertLogs("claude_evolve.core.evaluator", level=logging.WARNING) as cm:
+            metrics = asyncio.run(evaluator.evaluate(self.candidate))
+
+        self.assertEqual(metrics.get("combined_score", 0), 0.0)
+        # Check that at least one log message contains the candidate path
+        found = any("my_candidate.py" in msg for msg in cm.output)
+        self.assertTrue(found, f"Candidate path not found in logs: {cm.output}")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+
+class TestExponentialBackoff(unittest.TestCase):
+    """Retry sleep should use exponential backoff instead of fixed 0.5s."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        # Use os._exit(1) so the subprocess dies without writing a result
+        # file.  This triggers the RuntimeError branch in
+        # _subprocess_evaluate which is what exercises the retry+sleep path.
+        self.crash_script = os.path.join(self.tmpdir, "crash_eval.py")
+        with open(self.crash_script, "w") as f:
+            f.write("import os\ndef evaluate(path): os._exit(1)\n")
+        self.candidate = os.path.join(self.tmpdir, "candidate.py")
+        with open(self.candidate, "w") as f:
+            f.write("x = 1\n")
+
+    def test_backoff_increases_with_attempt(self):
+        """Backoff delays should increase: 0.5, 1.0, 2.0, ... (capped at 4.0)."""
+        import unittest.mock
+
+        config = EvaluatorConfig(mode="script", timeout=10, max_retries=3)
+        evaluator = Evaluator(config, self.crash_script)
+
+        sleep_calls = []
+
+        async def mock_sleep(duration):
+            sleep_calls.append(duration)
+
+        with unittest.mock.patch(
+            "claude_evolve.core.evaluator.asyncio.sleep",
+            side_effect=mock_sleep,
+        ):
+            asyncio.run(evaluator.evaluate(self.candidate))
+
+        # With max_retries=3, there are 4 attempts (0,1,2,3).
+        # Retries happen after attempts 0, 1, 2 (3 sleeps).
+        # Expected backoff: 0.5*(2^0)=0.5, 0.5*(2^1)=1.0, 0.5*(2^2)=2.0
+        self.assertEqual(len(sleep_calls), 3)
+        self.assertAlmostEqual(sleep_calls[0], 0.5, places=2)
+        self.assertAlmostEqual(sleep_calls[1], 1.0, places=2)
+        self.assertAlmostEqual(sleep_calls[2], 2.0, places=2)
+
+    def test_backoff_capped_at_4_seconds(self):
+        """Backoff should never exceed 4.0 seconds."""
+        import unittest.mock
+
+        config = EvaluatorConfig(mode="script", timeout=10, max_retries=5)
+        evaluator = Evaluator(config, self.crash_script)
+
+        sleep_calls = []
+
+        async def mock_sleep(duration):
+            sleep_calls.append(duration)
+
+        with unittest.mock.patch(
+            "claude_evolve.core.evaluator.asyncio.sleep",
+            side_effect=mock_sleep,
+        ):
+            asyncio.run(evaluator.evaluate(self.candidate))
+
+        # 5 retries -> sleeps after attempts 0..4 = 5 sleeps
+        # 0.5, 1.0, 2.0, 4.0, 4.0
+        self.assertEqual(len(sleep_calls), 5)
+        for delay in sleep_calls:
+            self.assertLessEqual(delay, 4.0)
+        # Last two should both be capped at 4.0
+        self.assertAlmostEqual(sleep_calls[3], 4.0, places=2)
+        self.assertAlmostEqual(sleep_calls[4], 4.0, places=2)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+
 if __name__ == "__main__":
     unittest.main()

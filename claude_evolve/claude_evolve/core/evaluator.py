@@ -279,7 +279,8 @@ class Evaluator:
 
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"Evaluation timed out after {self.config.timeout}s"
+                    f"Evaluation of '{artifact_path}' timed out after "
+                    f"{self.config.timeout}s"
                 )
                 if program_id:
                     self._pending_artifacts[program_id] = {
@@ -304,7 +305,8 @@ class Evaluator:
                         "attempt": str(attempt + 1),
                     }
                 if attempt < self.config.max_retries:
-                    await asyncio.sleep(0.5)
+                    backoff = min(0.5 * (2 ** attempt), 4.0)
+                    await asyncio.sleep(backoff)
 
         logger.error(
             f"All evaluation attempts failed{program_id_str}. "
