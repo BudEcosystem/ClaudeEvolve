@@ -45,6 +45,12 @@ class Artifact:
     # Embedding for novelty (optional)
     embedding: Optional[List[float]] = None
 
+    # Thought-code coevolution: rationale explaining the approach
+    rationale: Optional[str] = None
+
+    # Offspring count for power-law selection weighting
+    offspring_count: int = 0
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 

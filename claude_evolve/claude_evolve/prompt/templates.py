@@ -264,6 +264,16 @@ SOLVER_USER_TEMPLATE = (
     "rewritten program if starting fresh.\n"
 )
 
+RATIONALE_SECTION_TEMPLATE = (
+    "## Current Approach Rationale\n"
+    "{rationale}\n"
+    "\n"
+    "## Instructions\n"
+    "1. First, write an updated rationale (2-3 sentences) between "
+    "RATIONALE-START and RATIONALE-END markers\n"
+    "2. Then write the code implementing that approach\n"
+)
+
 DECOMPOSITION_USER_TEMPLATE = (
     "# Problem Decomposition Mode\n"
     "\n"
@@ -313,6 +323,7 @@ _INLINE_DEFAULTS: Dict[str, str] = {
     "warm_cache": WARM_CACHE_TEMPLATE,
     "solver_user": SOLVER_USER_TEMPLATE,
     "decomposition_user": DECOMPOSITION_USER_TEMPLATE,
+    "rationale_section": RATIONALE_SECTION_TEMPLATE,
 }
 
 # Inline fallback fragments

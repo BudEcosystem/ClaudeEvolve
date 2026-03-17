@@ -1392,5 +1392,85 @@ class TestContextBuilderFailuresText(unittest.TestCase):
         self.assertEqual(ctx["metadata"]["failures_text"], failures)
 
 
+# ---------------------------------------------------------------------------
+# Thought-Code Coevolution: rationale in context
+# ---------------------------------------------------------------------------
+class TestRationaleInContext(unittest.TestCase):
+    """Tests for parent_rationale parameter in build_context and render."""
+
+    def setUp(self):
+        self.builder = ContextBuilder(PromptConfig())
+        self.parent = Artifact(
+            id="rat-parent",
+            content="def solve(): pass",
+            metrics={"combined_score": 0.5},
+            rationale="Use greedy heuristic for speed",
+        )
+
+    def test_parent_rationale_in_metadata(self):
+        """parent_rationale should be stored in context metadata."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=1,
+            best_score=0.5,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            parent_rationale="Use greedy heuristic for speed",
+        )
+        self.assertEqual(
+            ctx["metadata"]["parent_rationale"],
+            "Use greedy heuristic for speed",
+        )
+
+    def test_parent_rationale_absent_when_not_provided(self):
+        """parent_rationale should not appear in metadata when None."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=1,
+            best_score=0.5,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+        )
+        self.assertNotIn("parent_rationale", ctx["metadata"])
+
+    def test_rationale_rendered_in_iteration_context(self):
+        """Rationale should appear in rendered Markdown when present."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=1,
+            best_score=0.5,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            parent_rationale="Greedy is fast but may miss optimum",
+        )
+        md = self.builder.render_iteration_context(ctx, iteration=1, max_iterations=10)
+        self.assertIn("Current Approach Rationale", md)
+        self.assertIn("Greedy is fast but may miss optimum", md)
+        self.assertIn("RATIONALE-START", md)
+
+    def test_rationale_not_rendered_when_absent(self):
+        """Rationale section should not appear when parent_rationale is None."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=1,
+            best_score=0.5,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+        )
+        md = self.builder.render_iteration_context(ctx, iteration=1, max_iterations=10)
+        self.assertNotIn("Current Approach Rationale", md)
+
+    def test_rationale_section_template_registered(self):
+        """The rationale_section template should be in TemplateManager."""
+        tm = TemplateManager()
+        self.assertTrue(tm.has_template("rationale_section"))
+        tpl = tm.get_template("rationale_section")
+        self.assertIn("{rationale}", tpl)
+
+
 if __name__ == "__main__":
     unittest.main()

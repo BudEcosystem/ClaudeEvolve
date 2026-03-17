@@ -91,6 +91,7 @@ class ContextBuilder:
         comparison_score: float = 0.0,
         failures_text: Optional[str] = None,
         evaluator_source: Optional[str] = None,
+        parent_rationale: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Build the full context dict for one evolution iteration.
@@ -137,6 +138,10 @@ class ContextBuilder:
             evaluator_source: Optional source code of the evaluator
                 script (first 200 lines). When present, it is shown
                 to the LLM so it can understand how candidates are scored.
+            parent_rationale: Optional rationale text from the parent
+                artifact explaining its approach. When present, a
+                rationale section is rendered in the prompt guiding
+                the LLM to continue thought-code coevolution.
             **kwargs: Extra keys forwarded into the user template.
 
         Returns:
@@ -288,6 +293,10 @@ class ContextBuilder:
         if evaluator_source:
             metadata["evaluator_source"] = evaluator_source
 
+        # Parent rationale for thought-code coevolution
+        if parent_rationale:
+            metadata["parent_rationale"] = parent_rationale
+
         return {
             "prompt": user_message,
             "system_message": system_message,
@@ -415,6 +424,15 @@ class ContextBuilder:
             lines.append("## Evaluator Source (How Candidates Are Scored)")
             lines.append("")
             lines.append(f"```python\n{evaluator_source}\n```")
+            lines.append("")
+
+        # Parent rationale for thought-code coevolution
+        parent_rationale = metadata.get("parent_rationale")
+        if parent_rationale:
+            rationale_template = self.template_manager.get_template(
+                "rationale_section"
+            )
+            lines.append(rationale_template.format(rationale=parent_rationale))
             lines.append("")
 
         # Embed the full prompt
