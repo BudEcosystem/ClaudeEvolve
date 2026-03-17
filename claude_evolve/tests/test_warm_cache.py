@@ -729,3 +729,179 @@ class TestEdgeCases:
         assert loaded is None  # JSON null -> Python None
         # But has() should still return True since the key is in manifest
         assert cache.has("nullable")
+
+
+# ---------------------------------------------------------------------------
+# LRU eviction (Task 6)
+# ---------------------------------------------------------------------------
+
+class TestLRUEviction:
+    """Test LRU eviction policy for warm cache."""
+
+    def test_max_items_parameter_accepted(self, tmp_path):
+        """WarmCache should accept a max_items parameter."""
+        cache = WarmCache(str(tmp_path / "cache"), max_items=10)
+        assert cache.max_items == 10
+
+    def test_default_max_items_is_50(self, tmp_path):
+        """Default max_items should be 50."""
+        cache = WarmCache(str(tmp_path / "cache"))
+        assert cache.max_items == 50
+
+    def test_lru_eviction_removes_oldest_json(self, tmp_path):
+        """Cache with max_items=3 should evict the oldest item when a 4th is added."""
+        import time as _time
+        cache = WarmCache(str(tmp_path / "cache"), max_items=3)
+        cache.load()
+        cache.put_json("key1", {"v": 1})
+        _time.sleep(0.02)
+        cache.put_json("key2", {"v": 2})
+        _time.sleep(0.02)
+        cache.put_json("key3", {"v": 3})
+        _time.sleep(0.02)
+        cache.put_json("key4", {"v": 4})
+        # key1 should be evicted (oldest)
+        assert not cache.has("key1")
+        assert cache.has("key2")
+        assert cache.has("key3")
+        assert cache.has("key4")
+
+    def test_lru_eviction_removes_oldest_text(self, tmp_path):
+        """Eviction should work for text items too."""
+        import time as _time
+        cache = WarmCache(str(tmp_path / "cache"), max_items=2)
+        cache.load()
+        cache.put_text("t1", "first")
+        _time.sleep(0.02)
+        cache.put_text("t2", "second")
+        _time.sleep(0.02)
+        cache.put_text("t3", "third")
+        assert not cache.has("t1")
+        assert cache.has("t2")
+        assert cache.has("t3")
+
+    def test_lru_eviction_removes_oldest_numpy(self, tmp_path):
+        """Eviction should work for numpy items too."""
+        import time as _time
+        cache = WarmCache(str(tmp_path / "cache"), max_items=2)
+        cache.load()
+        cache.put_numpy("n1", np.array([1]))
+        _time.sleep(0.02)
+        cache.put_numpy("n2", np.array([2]))
+        _time.sleep(0.02)
+        cache.put_numpy("n3", np.array([3]))
+        assert not cache.has("n1")
+        assert cache.has("n2")
+        assert cache.has("n3")
+
+    def test_lru_get_json_updates_access_time(self, tmp_path):
+        """Accessing an item via get_json should refresh its access time."""
+        import time as _time
+        cache = WarmCache(str(tmp_path / "cache"), max_items=3)
+        cache.load()
+        cache.put_json("key1", {"v": 1})
+        _time.sleep(0.02)
+        cache.put_json("key2", {"v": 2})
+        _time.sleep(0.02)
+        cache.put_json("key3", {"v": 3})
+        # Access key1 to refresh its access time
+        cache.get_json("key1")
+        _time.sleep(0.02)
+        cache.put_json("key4", {"v": 4})
+        # key2 should be evicted (oldest access), not key1
+        assert cache.has("key1")
+        assert not cache.has("key2")
+        assert cache.has("key3")
+        assert cache.has("key4")
+
+    def test_lru_get_numpy_updates_access_time(self, tmp_path):
+        """Accessing via get_numpy should refresh access time."""
+        import time as _time
+        cache = WarmCache(str(tmp_path / "cache"), max_items=3)
+        cache.load()
+        cache.put_numpy("n1", np.array([1]))
+        _time.sleep(0.02)
+        cache.put_numpy("n2", np.array([2]))
+        _time.sleep(0.02)
+        cache.put_numpy("n3", np.array([3]))
+        cache.get_numpy("n1")
+        _time.sleep(0.02)
+        cache.put_numpy("n4", np.array([4]))
+        assert cache.has("n1")
+        assert not cache.has("n2")
+
+    def test_lru_get_text_updates_access_time(self, tmp_path):
+        """Accessing via get_text should refresh access time."""
+        import time as _time
+        cache = WarmCache(str(tmp_path / "cache"), max_items=3)
+        cache.load()
+        cache.put_text("t1", "first")
+        _time.sleep(0.02)
+        cache.put_text("t2", "second")
+        _time.sleep(0.02)
+        cache.put_text("t3", "third")
+        cache.get_text("t1")
+        _time.sleep(0.02)
+        cache.put_text("t4", "fourth")
+        assert cache.has("t1")
+        assert not cache.has("t2")
+
+    def test_eviction_removes_backing_files(self, tmp_path):
+        """Evicted items should have their backing files removed from disk."""
+        import time as _time
+        cache = WarmCache(str(tmp_path / "cache"), max_items=2)
+        cache.load()
+        cache.put_json("evict_me", {"v": 1})
+        _time.sleep(0.02)
+        cache.put_json("keep1", {"v": 2})
+        _time.sleep(0.02)
+        cache.put_json("keep2", {"v": 3})
+        evicted_path = os.path.join(cache.items_dir, "evict_me.json")
+        assert not os.path.exists(evicted_path)
+
+    def test_eviction_does_not_exceed_max_items(self, tmp_path):
+        """After many inserts, cache should never exceed max_items."""
+        cache = WarmCache(str(tmp_path / "cache"), max_items=5)
+        cache.load()
+        for i in range(20):
+            cache.put_json(f"item_{i}", {"v": i})
+        assert len(cache.manifest) <= 5
+        assert len(cache.keys()) <= 5
+
+    def test_access_times_persist_across_load(self, tmp_path):
+        """Access times should be saved to disk and loaded back."""
+        cache_dir = str(tmp_path / "cache")
+        cache = WarmCache(cache_dir, max_items=10)
+        cache.load()
+        cache.put_json("persist_key", {"v": 1})
+        original_time = cache._access_times["persist_key"]
+
+        cache2 = WarmCache(cache_dir, max_items=10)
+        cache2.load()
+        assert "persist_key" in cache2._access_times
+        assert cache2._access_times["persist_key"] == original_time
+
+    def test_clear_resets_access_times(self, tmp_path):
+        """clear() should also reset access times."""
+        cache = WarmCache(str(tmp_path / "cache"), max_items=10)
+        cache.load()
+        cache.put_json("k1", 1)
+        cache.put_json("k2", 2)
+        assert len(cache._access_times) == 2
+        cache.clear()
+        assert len(cache._access_times) == 0
+
+    def test_overwrite_does_not_double_count(self, tmp_path):
+        """Overwriting a key should not increase item count."""
+        cache = WarmCache(str(tmp_path / "cache"), max_items=3)
+        cache.load()
+        cache.put_json("k1", {"v": 1})
+        cache.put_json("k2", {"v": 2})
+        cache.put_json("k1", {"v": 3})  # overwrite, not new
+        assert len(cache.manifest) == 2
+        cache.put_json("k3", {"v": 4})
+        # Should still have all 3 since overwrite didn't increase count
+        assert len(cache.manifest) == 3
+        assert cache.has("k1")
+        assert cache.has("k2")
+        assert cache.has("k3")

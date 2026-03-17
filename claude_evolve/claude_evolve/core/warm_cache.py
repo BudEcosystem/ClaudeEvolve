@@ -39,23 +39,36 @@ class WarmCache:
         │   └── <key>.txt       # plain text data
     """
 
-    def __init__(self, cache_dir: str) -> None:
+    def __init__(self, cache_dir: str, max_items: int = 50) -> None:
         self.cache_dir = cache_dir
+        self.max_items = max_items
         self.items_dir = os.path.join(cache_dir, "items")
         self.manifest_path = os.path.join(cache_dir, "manifest.json")
+        self._access_times_path = os.path.join(cache_dir, "access_times.json")
         self.manifest: Dict[str, Dict[str, Any]] = {}
+        self._access_times: Dict[str, float] = {}
         self._loaded = False
 
     def load(self) -> None:
-        """Load manifest from disk.
+        """Load manifest and access times from disk.
 
         Creates the cache directory structure if it does not exist.
         If a manifest file exists, its contents are loaded into memory.
+        Access times are loaded from a separate file; missing entries
+        default to the manifest timestamp.
         """
         os.makedirs(self.items_dir, exist_ok=True)
         if os.path.exists(self.manifest_path):
             with open(self.manifest_path, "r") as f:
                 self.manifest = json.load(f)
+        if os.path.exists(self._access_times_path):
+            with open(self._access_times_path, "r") as f:
+                self._access_times = json.load(f)
+        # Backfill access times for keys present in manifest but missing
+        # from the access-times file (e.g. pre-LRU caches).
+        for key, info in self.manifest.items():
+            if key not in self._access_times:
+                self._access_times[key] = info.get("timestamp", time.time())
         self._loaded = True
         logger.info(
             "Loaded warm cache from %s (%d items)",
@@ -64,14 +77,42 @@ class WarmCache:
         )
 
     def save(self) -> None:
-        """Save manifest to disk.
+        """Save manifest and access times to disk.
 
         Creates the cache directory structure if it does not exist and
-        writes the current manifest as indented JSON.
+        writes the current manifest and access times as indented JSON.
         """
         os.makedirs(self.items_dir, exist_ok=True)
         with open(self.manifest_path, "w") as f:
             json.dump(self.manifest, f, indent=2)
+        with open(self._access_times_path, "w") as f:
+            json.dump(self._access_times, f, indent=2)
+
+    # ------------------------------------------------------------------
+    # LRU eviction helpers
+    # ------------------------------------------------------------------
+
+    def _touch(self, key: str) -> None:
+        """Update the access time for *key* to the current time."""
+        self._access_times[key] = time.time()
+
+    def _evict_if_needed(self) -> None:
+        """Evict least-recently-used items until count is within *max_items*."""
+        while len(self.manifest) > self.max_items:
+            # Find the key with the oldest access time
+            oldest_key = min(self._access_times, key=self._access_times.get)
+            logger.debug("LRU evicting cache key '%s'", oldest_key)
+            self._remove_item(oldest_key)
+
+    def _remove_item(self, key: str) -> None:
+        """Remove a single item from manifest, access times, and disk."""
+        self.manifest.pop(key, None)
+        self._access_times.pop(key, None)
+        # Remove all backing files that could exist for this key
+        for ext in (".npy", ".json", ".txt"):
+            path = os.path.join(self.items_dir, f"{key}{ext}")
+            if os.path.exists(path):
+                os.remove(path)
 
     # ------------------------------------------------------------------
     # numpy storage
@@ -95,6 +136,8 @@ class WarmCache:
             "timestamp": time.time(),
             "metadata": metadata or {},
         }
+        self._touch(key)
+        self._evict_if_needed()
         self.save()
 
     def get_numpy(self, key: str) -> Optional[np.ndarray]:
@@ -108,6 +151,7 @@ class WarmCache:
         path = os.path.join(self.items_dir, f"{key}.npy")
         if not os.path.exists(path):
             return None
+        self._touch(key)
         return np.load(path)
 
     # ------------------------------------------------------------------
@@ -130,6 +174,8 @@ class WarmCache:
             "timestamp": time.time(),
             "metadata": metadata or {},
         }
+        self._touch(key)
+        self._evict_if_needed()
         self.save()
 
     def get_json(self, key: str) -> Optional[Any]:
@@ -143,6 +189,7 @@ class WarmCache:
         path = os.path.join(self.items_dir, f"{key}.json")
         if not os.path.exists(path):
             return None
+        self._touch(key)
         with open(path, "r") as f:
             return json.load(f)
 
@@ -166,6 +213,8 @@ class WarmCache:
             "timestamp": time.time(),
             "metadata": metadata or {},
         }
+        self._touch(key)
+        self._evict_if_needed()
         self.save()
 
     def get_text(self, key: str) -> Optional[str]:
@@ -179,6 +228,7 @@ class WarmCache:
         path = os.path.join(self.items_dir, f"{key}.txt")
         if not os.path.exists(path):
             return None
+        self._touch(key)
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
 
@@ -206,6 +256,7 @@ class WarmCache:
             shutil.rmtree(self.items_dir)
         os.makedirs(self.items_dir, exist_ok=True)
         self.manifest = {}
+        self._access_times = {}
         self.save()
 
     # ------------------------------------------------------------------
