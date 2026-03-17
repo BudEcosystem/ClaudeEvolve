@@ -6,7 +6,7 @@ Claude Evolve uses **MAP-Elites quality-diversity search** with island-based pop
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-848%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-1039%20passing-brightgreen.svg)]()
 
 ---
 
@@ -74,16 +74,24 @@ Each iteration, Claude receives **different context** — a new parent artifact 
 
 ### Research-Driven Discovery (v2)
 - **Stagnation Engine** — detects plateaus (5 levels: NONE to CRITICAL) and adapts exploration
+- **Continuous G_t Signal** — AdaEvolve-inspired exponential moving average replacing discrete stagnation levels, driving all adaptation from a single continuous signal
 - **Research Agent** — literature search and approach discovery via web search
 - **Diagnostician Agent** — root cause analysis of why evolution is stuck
-- **Strategy Evolver** — selects and adapts strategies based on stagnation level and past performance
+- **UCB1 Strategy Selection** — bandit-based strategy selection replacing weighted-random, with capped reward and exploration modulation
 - **Cross-Run Memory** — persists learnings, failed approaches, and successful strategies across runs
+- **Meta-Scratchpad** — periodic pattern synthesis from evolution history (ShinkaEvolve-inspired)
+- **Verbal Gradients** — pairwise reflection comparing artifacts to generate directional mutation guidance (ReEvo-inspired)
+- **Thought-Code Coevolution** — evolves natural-language rationale alongside code for better LLM reasoning (EoH-inspired)
 
 ### Warm-Start & Accumulation (v3)
-- **Warm-Start Cache** — persists intermediate computation (numpy arrays, JSON, text) between iterations
+- **Warm-Start Cache** — persists intermediate computation (numpy arrays, JSON, text) between iterations with LRU eviction
 - **Multi-Iteration Accumulation** — each iteration continues from where the last left off, enabling sustained search across hundreds of iterations
 - **Evaluation Caching** — skip re-evaluation of deterministic results
 - **Solution Seeding** — inject known-good solutions into the population
+- **Power-Law Parent Selection** — rank-based selection with adaptive alpha from G_t signal and offspring novelty weighting (ShinkaEvolve/FunSearch-inspired)
+- **Failure Reflexion** — captures recent failures with reasons, injecting "avoid these" guidance into future iterations
+- **Pre-Evaluation Novelty Gate** — rejects near-duplicate candidates before wasting evaluation budget
+- **IterationOrchestrator** — unified coordination of all feature modules for next/submit lifecycle
 
 ### Universal Novelty & Diversity (v3)
 - **Structural similarity** — token n-gram overlap analysis working across Python, JS, YAML, JSON, SQL, markdown, and prose
@@ -104,7 +112,7 @@ Each iteration, Claude receives **different context** — a new parent artifact 
 - **Hybrid problems** (data science, ML) — model checkpoints, hyperparameter search, problem decomposition
 
 ### Production Quality
-- **848 tests** covering unit, integration, and end-to-end flows
+- **1039 tests** covering unit, integration, and end-to-end flows
 - **Subprocess isolation** — evaluator runs in isolated subprocess with timeout protection
 - **Checkpoint/resume** — periodic snapshots with seamless resume
 - **Session isolation** — multiple sessions don't interfere
@@ -227,7 +235,7 @@ bash install.sh
 
 ```bash
 claude-evolve --help
-cd claude_evolve && python -m pytest tests/ -q  # 848 tests
+cd claude_evolve && python -m pytest tests/ -q  # 1039 tests
 ```
 
 ---
@@ -399,8 +407,13 @@ ClaudeEvolve/
 │   │   │   ├── memory.py             # Cross-run memory (v2)
 │   │   │   ├── research.py           # Research log management (v2)
 │   │   │   ├── strategy.py           # Strategy evolver (v2)
-│   │   │   ├── warm_cache.py         # Warm-start cache (v3)
-│   │   │   └── novelty.py            # Universal novelty system (v3)
+│   │   │   ├── warm_cache.py         # Warm-start cache with LRU eviction (v3)
+│   │   │   ├── novelty.py            # Universal novelty system (v3)
+│   │   │   ├── improvement_signal.py # Continuous G_t signal (v4, AdaEvolve)
+│   │   │   ├── ucb_selector.py       # UCB1 strategy selection (v4, ShinkaEvolve)
+│   │   │   ├── reflection.py         # Verbal gradients engine (v4, ReEvo)
+│   │   │   ├── scratchpad.py         # Meta-scratchpad synthesis (v4, ShinkaEvolve)
+│   │   │   └── orchestrator.py       # IterationOrchestrator (v4)
 │   │   ├── prompt/
 │   │   │   ├── context_builder.py    # Per-iteration context generation
 │   │   │   └── templates.py          # Template management
@@ -409,7 +422,7 @@ ClaudeEvolve/
 │   │   │   └── checkpoint.py         # Checkpoint management
 │   │   ├── cli.py                    # CLI (init/next/submit/diagnose/seed/cache)
 │   │   └── config.py                 # 6 sub-configs + master config
-│   └── tests/                        # 848 tests
+│   └── tests/                        # 1039 tests
 ├── plugin/                           # Claude Code plugin
 │   ├── hooks/stop-hook.sh            # Evolution loop + stagnation
 │   ├── skills/evolve/SKILL.md        # Iteration protocol + problem guidance
@@ -441,7 +454,7 @@ ClaudeEvolve/
 
 ```bash
 cd claude_evolve
-python -m pytest tests/ -v             # All 848 tests
+python -m pytest tests/ -v             # All 1039 tests
 python -m pytest tests/ -q             # Quick summary
 python -m pytest tests/test_database.py # Specific module
 ```
