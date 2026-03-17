@@ -1060,6 +1060,87 @@ class ArtifactDatabase:
             return self.artifacts[random.choice(in_island)]
         return self.artifacts[random.choice(valid_archive)]
 
+    def select_parent_power_law(
+        self,
+        island_id: int,
+        exploration_intensity: float = 0.5,
+        i_max: float = 0.7,
+    ) -> Optional[Artifact]:
+        """Rank-based power-law parent selection with offspring novelty weighting.
+
+        Selects a parent from the specified island using a rank-based
+        power-law distribution.  Higher-ranked (fitter) artifacts are
+        selected more often, but the sharpness of the distribution is
+        modulated by ``exploration_intensity``: low EI produces a steep
+        distribution (exploitation), high EI produces a flatter one
+        (exploration).  Each artifact's selection weight is further
+        scaled by ``1 / (1 + offspring_count)`` so that over-exploited
+        parents are chosen less often.
+
+        Args:
+            island_id: Index of the island to sample from.
+            exploration_intensity: Current exploration intensity from the
+                improvement signal (0 = pure exploitation, i_max = pure
+                exploration).
+            i_max: Maximum exploration intensity for normalisation.
+
+        Returns:
+            Selected parent Artifact, or ``None`` if the island is empty.
+        """
+        with self._lock:
+            island_id = island_id % len(self.islands)
+            if not self.islands[island_id]:
+                return None
+
+            valid_ids = [
+                pid
+                for pid in self.islands[island_id]
+                if pid in self.artifacts
+            ]
+            if not valid_ids:
+                return None
+
+            # Sort by fitness descending (best first => rank 1)
+            sorted_ids = sorted(
+                valid_ids,
+                key=lambda pid: get_fitness_score(
+                    self.artifacts[pid].metrics,
+                    self.config.feature_dimensions,
+                ),
+                reverse=True,
+            )
+
+            # Compute alpha from exploration intensity
+            # High EI -> low alpha (flat) ; Low EI -> high alpha (steep)
+            normalized_ei = min(
+                exploration_intensity / max(i_max, 1e-6), 1.0
+            )
+            alpha = 0.3 + 3.0 * (1.0 - normalized_ei)
+
+            # Power-law fitness weights: p_i = rank^(-alpha)
+            n = len(sorted_ids)
+            fitness_weights = [(rank + 1) ** (-alpha) for rank in range(n)]
+
+            # Offspring novelty weights: 1 / (1 + offspring_count)
+            novelty_weights = [
+                1.0 / (1.0 + getattr(self.artifacts[pid], "offspring_count", 0))
+                for pid in sorted_ids
+            ]
+
+            # Combined weights
+            combined = [
+                fw * nw
+                for fw, nw in zip(fitness_weights, novelty_weights)
+            ]
+            total = sum(combined)
+            if total <= 0:
+                return self.artifacts[sorted_ids[0]]
+
+            probs = [w / total for w in combined]
+
+            chosen_id = random.choices(sorted_ids, weights=probs, k=1)[0]
+            return self.artifacts[chosen_id]
+
     def _sample_inspirations(
         self, parent: Artifact, n: int = 5
     ) -> List[Artifact]:

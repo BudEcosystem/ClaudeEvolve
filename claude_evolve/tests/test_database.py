@@ -1037,5 +1037,174 @@ class TestIslandArtifactSyncGuard(unittest.TestCase):
         self.assertNotIn("ghost_2", db.islands[real_island])
 
 
+# ---------------------------------------------------------------------------
+# Power-Law Parent Selection (CG5)
+# ---------------------------------------------------------------------------
+class TestPowerLawParentSelection(unittest.TestCase):
+    """Tests for select_parent_power_law with rank-based distribution
+    and offspring novelty weighting."""
+
+    def setUp(self):
+        self.config = DatabaseConfig(
+            num_islands=1,
+            population_size=200,
+            # similarity_threshold=1.0 means only reject exact duplicates.
+            similarity_threshold=1.0,
+        )
+        self.db = ArtifactDatabase(self.config)
+
+    def _populate(self, n=10):
+        """Add n artifacts with scores 0.1, 0.2, ..., 1.0.
+
+        Artifacts are added directly to both the artifact store and the
+        island set to avoid MAP-Elites cell replacement, which would
+        collapse multiple artifacts into a single cell and make the
+        distribution tests unreliable.
+        """
+        for i in range(n):
+            a = Artifact(
+                id=f"pl_{i}",
+                content=f"def func_{i}(): return {i}\n",
+                metrics={"combined_score": 0.1 * (i + 1)},
+                metadata={"island": 0},
+            )
+            self.db.artifacts[a.id] = a
+            self.db.islands[0].add(a.id)
+
+    def test_returns_none_on_empty_island(self):
+        """Selecting from an empty island returns None."""
+        result = self.db.select_parent_power_law(island_id=0)
+        self.assertIsNone(result)
+
+    def test_returns_artifact_on_populated_island(self):
+        """Basic invocation returns a valid Artifact."""
+        self._populate()
+        result = self.db.select_parent_power_law(island_id=0)
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, Artifact)
+
+    def test_high_alpha_favors_best(self):
+        """With high alpha (low exploration_intensity), the top-scoring
+        artifact should be selected most frequently."""
+        self._populate(10)
+        counts = {}
+        for _ in range(500):
+            parent = self.db.select_parent_power_law(
+                island_id=0, exploration_intensity=0.05, i_max=0.7
+            )
+            if parent:
+                bucket = round(parent.metrics.get("combined_score", 0), 1)
+                counts[bucket] = counts.get(bucket, 0) + 1
+        # Highest-score bucket should be the most selected
+        best_bucket = max(counts, key=counts.get)
+        self.assertGreaterEqual(best_bucket, 0.7)
+
+    def test_low_alpha_more_uniform(self):
+        """With low alpha (high exploration_intensity), selection should
+        be spread across more score buckets."""
+        self._populate(10)
+        counts = {}
+        for _ in range(500):
+            parent = self.db.select_parent_power_law(
+                island_id=0, exploration_intensity=0.65, i_max=0.7
+            )
+            if parent:
+                bucket = round(parent.metrics.get("combined_score", 0), 1)
+                counts[bucket] = counts.get(bucket, 0) + 1
+        # Should have selections across at least 4 distinct score buckets
+        self.assertGreaterEqual(len(counts), 4)
+
+    def test_offspring_count_affects_selection(self):
+        """Artifacts with high offspring_count should be selected less
+        often than fresh ones with the same score."""
+        over_exploited = Artifact(
+            id="over",
+            content="def alpha(): return 1\n",
+            metrics={"combined_score": 0.9},
+            offspring_count=50,
+            metadata={"island": 0},
+        )
+        fresh = Artifact(
+            id="fresh",
+            content="def beta(): return 2\n",
+            metrics={"combined_score": 0.9},
+            offspring_count=0,
+            metadata={"island": 0},
+        )
+        # Direct insert to bypass MAP-Elites cell replacement
+        self.db.artifacts["over"] = over_exploited
+        self.db.islands[0].add("over")
+        self.db.artifacts["fresh"] = fresh
+        self.db.islands[0].add("fresh")
+
+        counts = {"over": 0, "fresh": 0}
+        for _ in range(300):
+            p = self.db.select_parent_power_law(
+                island_id=0, exploration_intensity=0.3, i_max=0.7
+            )
+            if p and p.id == "over":
+                counts["over"] += 1
+            elif p and p.id == "fresh":
+                counts["fresh"] += 1
+        # Fresh artifact should be selected more often
+        self.assertGreater(counts["fresh"], counts["over"])
+
+    def test_single_artifact_always_returned(self):
+        """With a single artifact, it should always be selected."""
+        a = Artifact(
+            id="solo",
+            content="solo_power_law_test_content",
+            metrics={"combined_score": 0.5},
+        )
+        self.db.add(a, target_island=0)
+        for _ in range(20):
+            result = self.db.select_parent_power_law(island_id=0)
+            self.assertIsNotNone(result)
+            self.assertEqual(result.id, "solo")
+
+    def test_thread_safe(self):
+        """Concurrent calls to select_parent_power_law should not raise."""
+        self._populate(20)
+        errors = []
+
+        def select_many():
+            for _ in range(50):
+                try:
+                    result = self.db.select_parent_power_law(
+                        island_id=0, exploration_intensity=0.4
+                    )
+                    assert result is not None
+                except Exception as e:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=select_many) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(errors), 0, f"Errors during concurrent selection: {errors}")
+
+    def test_island_id_wraps(self):
+        """island_id larger than num_islands should wrap via modulo."""
+        self._populate(5)
+        # island_id=10 should wrap to 0 (since num_islands=1)
+        result = self.db.select_parent_power_law(island_id=10)
+        self.assertIsNotNone(result)
+
+    def test_orphaned_ids_handled(self):
+        """Orphaned IDs in island set should be filtered out gracefully."""
+        a = Artifact(
+            id="real_pl",
+            content="real_power_law_content",
+            metrics={"combined_score": 0.5},
+        )
+        self.db.add(a, target_island=0)
+        # Inject an orphaned ID
+        self.db.islands[0].add("ghost_power_law")
+        result = self.db.select_parent_power_law(island_id=0)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.id, "real_pl")
+
+
 if __name__ == "__main__":
     unittest.main()
