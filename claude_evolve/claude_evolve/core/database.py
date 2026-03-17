@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -158,6 +159,10 @@ class ArtifactDatabase:
         # skipped in claude_evolve; this controls the simple check)
         self.similarity_threshold = getattr(config, "similarity_threshold", 0.99)
 
+        # Thread safety: RLock because migrate_programs() -> add() and
+        # sample_from_island() -> sample() create reentrant call chains.
+        self._lock = threading.RLock()
+
         # Load from disk if path provided
         if config.db_path and os.path.exists(config.db_path):
             self.load(config.db_path)
@@ -188,91 +193,148 @@ class ArtifactDatabase:
         Returns:
             Artifact ID.
         """
-        if iteration is not None:
-            artifact.iteration_found = iteration
-            self.last_iteration = max(self.last_iteration, iteration)
+        with self._lock:
+            if iteration is not None:
+                artifact.iteration_found = iteration
+                self.last_iteration = max(self.last_iteration, iteration)
 
-        self.artifacts[artifact.id] = artifact
+            self.artifacts[artifact.id] = artifact
 
-        # MAP-Elites feature coordinates
-        feature_coords = self._calculate_feature_coords(artifact)
+            # MAP-Elites feature coordinates
+            feature_coords = self._calculate_feature_coords(artifact)
 
-        # Determine target island
-        if target_island is None and artifact.parent_id:
-            parent = self.artifacts.get(artifact.parent_id)
-            if parent and "island" in parent.metadata:
-                island_idx = parent.metadata["island"]
+            # Determine target island
+            if target_island is None and artifact.parent_id:
+                parent = self.artifacts.get(artifact.parent_id)
+                if parent and "island" in parent.metadata:
+                    island_idx = parent.metadata["island"]
+                else:
+                    island_idx = self.current_island
+            elif target_island is not None:
+                island_idx = target_island
             else:
                 island_idx = self.current_island
-        elif target_island is not None:
-            island_idx = target_island
-        else:
-            island_idx = self.current_island
 
-        island_idx = island_idx % len(self.islands)
+            island_idx = island_idx % len(self.islands)
 
-        # Novelty gate
-        if not self._is_novel(artifact.id, island_idx):
-            logger.debug(
-                "Artifact %s failed novelty check for island %d",
-                artifact.id,
-                island_idx,
-            )
-            return artifact.id
-
-        # Feature-map placement (replace if better)
-        feature_key = self._feature_coords_to_key(feature_coords)
-        island_feature_map = self.island_feature_maps[island_idx]
-        should_replace = feature_key not in island_feature_map
-
-        if not should_replace:
-            existing_id = island_feature_map[feature_key]
-            if existing_id not in self.artifacts:
-                should_replace = True
-            else:
-                should_replace = self._is_better(
-                    artifact, self.artifacts[existing_id]
+            # Novelty gate
+            if not self._is_novel(artifact.id, island_idx):
+                logger.debug(
+                    "Artifact %s failed novelty check for island %d",
+                    artifact.id,
+                    island_idx,
                 )
+                return artifact.id
 
-        if should_replace:
-            if feature_key in island_feature_map:
+            # Feature-map placement (replace if better)
+            feature_key = self._feature_coords_to_key(feature_coords)
+            island_feature_map = self.island_feature_maps[island_idx]
+            should_replace = feature_key not in island_feature_map
+
+            if not should_replace:
                 existing_id = island_feature_map[feature_key]
-                if existing_id in self.artifacts:
-                    # Maintain archive consistency
-                    if existing_id in self.archive:
-                        self.archive.discard(existing_id)
-                        self.archive.add(artifact.id)
-                # Remove replaced artifact from island set
-                self.islands[island_idx].discard(existing_id)
+                if existing_id not in self.artifacts:
+                    should_replace = True
+                else:
+                    should_replace = self._is_better(
+                        artifact, self.artifacts[existing_id]
+                    )
 
-            island_feature_map[feature_key] = artifact.id
+            if should_replace:
+                if feature_key in island_feature_map:
+                    existing_id = island_feature_map[feature_key]
+                    if existing_id in self.artifacts:
+                        # Maintain archive consistency
+                        if existing_id in self.archive:
+                            self.archive.discard(existing_id)
+                            self.archive.add(artifact.id)
+                    # Remove replaced artifact from island set
+                    self.islands[island_idx].discard(existing_id)
 
-        # Add to island
-        self.islands[island_idx].add(artifact.id)
+                island_feature_map[feature_key] = artifact.id
 
-        # Track island membership
-        artifact.metadata["island"] = island_idx
+            # Add to island
+            self.islands[island_idx].add(artifact.id)
 
-        # Update archive
-        self._update_archive(artifact)
+            # Track island membership
+            artifact.metadata["island"] = island_idx
 
-        # Enforce population size limit (protect newly added)
-        self._enforce_population_limit(exclude_program_id=artifact.id)
+            # Update archive
+            self._update_archive(artifact)
 
-        # Update best tracking
-        self._update_best(artifact)
-        self._update_island_best(artifact, island_idx)
+            # Enforce population size limit (protect newly added)
+            self._enforce_population_limit(exclude_program_id=artifact.id)
 
-        # Persist if configured
-        if self.config.db_path:
-            self._save_artifact(artifact)
+            # Update best tracking
+            self._update_best(artifact)
+            self._update_island_best(artifact, island_idx)
 
-        logger.debug("Added artifact %s to island %d", artifact.id, island_idx)
-        return artifact.id
+            # Persist if configured
+            if self.config.db_path:
+                self._save_artifact(artifact)
+
+            logger.debug("Added artifact %s to island %d", artifact.id, island_idx)
+            return artifact.id
 
     def get(self, artifact_id: str) -> Optional[Artifact]:
         """Retrieve an artifact by ID, or ``None``."""
         return self.artifacts.get(artifact_id)
+
+    def remove(self, artifact_id: str) -> bool:
+        """Remove an artifact and clean all internal references.
+
+        Removes the artifact from the main store, all island sets,
+        island feature maps, and the archive.  Updates island-best
+        and global-best tracking when the removed artifact held those
+        positions.
+
+        Args:
+            artifact_id: ID of the artifact to remove.
+
+        Returns:
+            ``True`` if the artifact was found and removed, ``False``
+            if the ID was not present.
+        """
+        with self._lock:
+            if artifact_id not in self.artifacts:
+                return False
+
+            del self.artifacts[artifact_id]
+
+            # Clean from all island sets
+            for island in self.islands:
+                island.discard(artifact_id)
+
+            # Clean from island feature maps
+            for island_map in self.island_feature_maps:
+                cells_to_clean = [
+                    cell for cell, aid in island_map.items()
+                    if aid == artifact_id
+                ]
+                for cell in cells_to_clean:
+                    del island_map[cell]
+
+            # Clean from archive
+            self.archive.discard(artifact_id)
+
+            # Repair global best if it pointed to the removed artifact
+            if self.best_program_id == artifact_id:
+                self.best_program_id = None
+                if self.artifacts:
+                    best = max(
+                        self.artifacts.values(),
+                        key=lambda a: get_fitness_score(
+                            a.metrics, self.config.feature_dimensions
+                        ),
+                    )
+                    self.best_program_id = best.id
+
+            # Repair per-island bests
+            for idx, best_pid in enumerate(self.island_best_programs):
+                if best_pid == artifact_id:
+                    self.island_best_programs[idx] = None
+
+            return True
 
     def sample(
         self, num_inspirations: Optional[int] = None
@@ -286,16 +348,17 @@ class ArtifactDatabase:
         Returns:
             Tuple of (parent, inspirations).
         """
-        parent = self._sample_parent()
-        if num_inspirations is None:
-            num_inspirations = 5
-        inspirations = self._sample_inspirations(parent, n=num_inspirations)
-        logger.debug(
-            "Sampled parent %s and %d inspirations",
-            parent.id,
-            len(inspirations),
-        )
-        return parent, inspirations
+        with self._lock:
+            parent = self._sample_parent()
+            if num_inspirations is None:
+                num_inspirations = 5
+            inspirations = self._sample_inspirations(parent, n=num_inspirations)
+            logger.debug(
+                "Sampled parent %s and %d inspirations",
+                parent.id,
+                len(inspirations),
+            )
+            return parent, inspirations
 
     def sample_from_island(
         self,
@@ -312,42 +375,43 @@ class ArtifactDatabase:
         Returns:
             Tuple of (parent, inspirations).
         """
-        island_id = island_id % len(self.islands)
-        island_programs = list(self.islands[island_id])
+        with self._lock:
+            island_id = island_id % len(self.islands)
+            island_programs = list(self.islands[island_id])
 
-        if not island_programs:
-            logger.debug(
-                "Island %d is empty, falling back to global sample",
-                island_id,
-            )
-            return self.sample(num_inspirations)
+            if not island_programs:
+                logger.debug(
+                    "Island %d is empty, falling back to global sample",
+                    island_id,
+                )
+                return self.sample(num_inspirations)
 
-        rand_val = random.random()
+            rand_val = random.random()
 
-        if rand_val < self.config.exploration_ratio:
-            parent = self._sample_from_island_random(island_id)
-        elif rand_val < (
-            self.config.exploration_ratio + self.config.exploitation_ratio
-        ):
-            parent = self._sample_from_archive_for_island(island_id)
-        else:
-            parent = self._sample_from_island_weighted(island_id)
+            if rand_val < self.config.exploration_ratio:
+                parent = self._sample_from_island_random(island_id)
+            elif rand_val < (
+                self.config.exploration_ratio + self.config.exploitation_ratio
+            ):
+                parent = self._sample_from_archive_for_island(island_id)
+            else:
+                parent = self._sample_from_island_weighted(island_id)
 
-        if num_inspirations is None:
-            num_inspirations = 5
+            if num_inspirations is None:
+                num_inspirations = 5
 
-        other = [pid for pid in island_programs if pid != parent.id]
-        if len(other) < num_inspirations:
-            inspiration_ids = other
-        else:
-            inspiration_ids = random.sample(other, num_inspirations)
+            other = [pid for pid in island_programs if pid != parent.id]
+            if len(other) < num_inspirations:
+                inspiration_ids = other
+            else:
+                inspiration_ids = random.sample(other, num_inspirations)
 
-        inspirations = [
-            self.artifacts[pid]
-            for pid in inspiration_ids
-            if pid in self.artifacts
-        ]
-        return parent, inspirations
+            inspirations = [
+                self.artifacts[pid]
+                for pid in inspiration_ids
+                if pid in self.artifacts
+            ]
+            return parent, inspirations
 
     def get_best(self, metric: Optional[str] = None) -> Optional[Artifact]:
         """
@@ -924,17 +988,25 @@ class ArtifactDatabase:
         if not island_programs:
             return self._sample_random_parent()
 
-        if len(island_programs) == 1:
-            pid = island_programs[0]
-            if pid in self.artifacts:
-                return self.artifacts[pid]
+        # Guard: filter to only valid (non-orphaned) IDs and clean stale refs
+        valid_ids = [pid for pid in island_programs if pid in self.artifacts]
+        orphaned = set(island_programs) - set(valid_ids)
+        if orphaned:
+            logger.warning(
+                "Removed %d orphaned IDs from island %d during sampling",
+                len(orphaned),
+                island_id,
+            )
+            for oid in orphaned:
+                self.islands[island_id].discard(oid)
+
+        if not valid_ids:
             return self._sample_random_parent()
 
-        objs = [
-            self.artifacts[pid]
-            for pid in island_programs
-            if pid in self.artifacts
-        ]
+        if len(valid_ids) == 1:
+            return self.artifacts[valid_ids[0]]
+
+        objs = [self.artifacts[pid] for pid in valid_ids]
         if not objs:
             return self._sample_random_parent()
 
@@ -1177,73 +1249,74 @@ class ArtifactDatabase:
 
     def migrate_programs(self) -> None:
         """Copy top artifacts from each island to adjacent islands (ring topology)."""
-        if len(self.islands) < 2:
-            return
+        with self._lock:
+            if len(self.islands) < 2:
+                return
 
-        logger.info("Performing migration between islands")
+            logger.info("Performing migration between islands")
 
-        for i, island in enumerate(self.islands):
-            if not island:
-                continue
-
-            island_artifacts = [
-                self.artifacts[pid]
-                for pid in island
-                if pid in self.artifacts
-            ]
-            if not island_artifacts:
-                continue
-
-            island_artifacts.sort(
-                key=lambda a: get_fitness_score(
-                    a.metrics, self.config.feature_dimensions
-                ),
-                reverse=True,
-            )
-
-            num_migrate = max(1, int(len(island_artifacts) * self.migration_rate))
-            migrants = island_artifacts[:num_migrate]
-
-            targets = [
-                (i + 1) % len(self.islands),
-                (i - 1) % len(self.islands),
-            ]
-
-            for migrant in migrants:
-                if migrant.metadata.get("migrant", False):
+            for i, island in enumerate(self.islands):
+                if not island:
                     continue
 
-                for target in targets:
-                    # Skip duplicates
-                    target_artifacts = [
-                        self.artifacts[pid]
-                        for pid in self.islands[target]
-                        if pid in self.artifacts
-                    ]
-                    if any(a.content == migrant.content for a in target_artifacts):
+                island_artifacts = [
+                    self.artifacts[pid]
+                    for pid in island
+                    if pid in self.artifacts
+                ]
+                if not island_artifacts:
+                    continue
+
+                island_artifacts.sort(
+                    key=lambda a: get_fitness_score(
+                        a.metrics, self.config.feature_dimensions
+                    ),
+                    reverse=True,
+                )
+
+                num_migrate = max(1, int(len(island_artifacts) * self.migration_rate))
+                migrants = island_artifacts[:num_migrate]
+
+                targets = [
+                    (i + 1) % len(self.islands),
+                    (i - 1) % len(self.islands),
+                ]
+
+                for migrant in migrants:
+                    if migrant.metadata.get("migrant", False):
                         continue
 
-                    copy = Artifact(
-                        id=str(uuid.uuid4()),
-                        content=migrant.content,
-                        changes_description=migrant.changes_description,
-                        artifact_type=migrant.artifact_type,
-                        parent_id=migrant.id,
-                        generation=migrant.generation,
-                        metrics=migrant.metrics.copy(),
-                        metadata={
-                            **migrant.metadata,
-                            "island": target,
-                            "migrant": True,
-                        },
-                    )
-                    self.add(copy, target_island=target)
+                    for target in targets:
+                        # Skip duplicates
+                        target_artifacts = [
+                            self.artifacts[pid]
+                            for pid in self.islands[target]
+                            if pid in self.artifacts
+                        ]
+                        if any(a.content == migrant.content for a in target_artifacts):
+                            continue
 
-        self.last_migration_generation = max(self.island_generations)
-        logger.info(
-            "Migration completed at generation %d",
-            self.last_migration_generation,
-        )
+                        copy = Artifact(
+                            id=str(uuid.uuid4()),
+                            content=migrant.content,
+                            changes_description=migrant.changes_description,
+                            artifact_type=migrant.artifact_type,
+                            parent_id=migrant.id,
+                            generation=migrant.generation,
+                            metrics=migrant.metrics.copy(),
+                            metadata={
+                                **migrant.metadata,
+                                "island": target,
+                                "migrant": True,
+                            },
+                        )
+                        self.add(copy, target_island=target)
+
+            self.last_migration_generation = max(self.island_generations)
+            logger.info(
+                "Migration completed at generation %d",
+                self.last_migration_generation,
+            )
 
     def _reconstruct_islands(
         self, saved_islands: List[List[str]]

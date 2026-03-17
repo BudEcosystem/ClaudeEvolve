@@ -3,12 +3,13 @@ Tests for the MAP-Elites ArtifactDatabase.
 
 Covers initialization, add/get, MAP-Elites placement, island evolution,
 sampling, persistence, artifact storage, diversity, feature scaling,
-migration, and edge cases.
+migration, thread safety, and edge cases.
 """
 
 import json
 import os
 import tempfile
+import threading
 import unittest
 
 from claude_evolve.core.artifact import Artifact
@@ -772,6 +773,141 @@ class TestLineSimilarity(unittest.TestCase):
 
     def test_whitespace_normalization(self):
         self.assertAlmostEqual(ArtifactDatabase._line_similarity("  a  \n  b  ", "a\nb"), 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Thread safety
+# ---------------------------------------------------------------------------
+class TestThreadSafety(unittest.TestCase):
+    """Tests that concurrent operations on ArtifactDatabase are safe."""
+
+    def test_concurrent_adds_produce_correct_count(self):
+        """Multiple threads calling add() should produce correct total artifact count."""
+        config = DatabaseConfig(
+            num_islands=2, population_size=200, similarity_threshold=0.0
+        )
+        db = ArtifactDatabase(config)
+        errors = []
+        num_threads = 20
+
+        def add_artifact(i):
+            try:
+                a = Artifact(
+                    id=f"thread_{i}",
+                    content=f"program_{i}" * (i + 1),
+                    artifact_type="python",
+                    metrics={"combined_score": 0.5 + i * 0.001},
+                )
+                db.add(a, iteration=i)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=add_artifact, args=(i,))
+            for i in range(num_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Errors during concurrent add: {errors}")
+        self.assertEqual(db.size(), num_threads)
+
+    def test_concurrent_adds_no_data_corruption(self):
+        """After concurrent adds, all artifacts should be retrievable and internally consistent."""
+        config = DatabaseConfig(
+            num_islands=2, population_size=200, similarity_threshold=0.0
+        )
+        db = ArtifactDatabase(config)
+        errors = []
+        num_threads = 20
+
+        def add_artifact(i):
+            try:
+                a = Artifact(
+                    id=f"consist_{i}",
+                    content=f"consist_program_{i}" * (i + 1),
+                    artifact_type="python",
+                    metrics={"combined_score": float(i)},
+                )
+                db.add(a, iteration=i)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=add_artifact, args=(i,))
+            for i in range(num_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Errors during concurrent add: {errors}")
+        # All 20 artifacts should be retrievable
+        for i in range(num_threads):
+            a = db.get(f"consist_{i}")
+            self.assertIsNotNone(a, f"Artifact consist_{i} missing")
+            self.assertEqual(a.metrics["combined_score"], float(i))
+        # Every artifact in an island set should exist in the main store
+        for idx, island in enumerate(db.islands):
+            for pid in island:
+                self.assertIn(pid, db.artifacts, f"{pid} in island {idx} but not in artifacts")
+
+    def test_concurrent_add_and_sample(self):
+        """Concurrent add() and sample() should not raise."""
+        config = DatabaseConfig(
+            num_islands=2, population_size=200, similarity_threshold=0.0
+        )
+        db = ArtifactDatabase(config)
+        # Seed with one artifact so sample() doesn't fail on empty db
+        seed = Artifact(
+            id="seed", content="seed_program", metrics={"combined_score": 0.5}
+        )
+        db.add(seed)
+
+        errors = []
+
+        def add_artifacts(start):
+            for i in range(10):
+                try:
+                    idx = start + i
+                    a = Artifact(
+                        id=f"add_{idx}",
+                        content=f"add_program_{idx}" * (idx + 1),
+                        artifact_type="python",
+                        metrics={"combined_score": 0.5 + idx * 0.01},
+                    )
+                    db.add(a)
+                except Exception as e:
+                    errors.append(e)
+
+        def sample_repeatedly():
+            for _ in range(10):
+                try:
+                    parent, inspirations = db.sample(num_inspirations=2)
+                    assert parent is not None
+                except Exception as e:
+                    errors.append(e)
+
+        threads = [
+            threading.Thread(target=add_artifacts, args=(0,)),
+            threading.Thread(target=add_artifacts, args=(10,)),
+            threading.Thread(target=sample_repeatedly),
+            threading.Thread(target=sample_repeatedly),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Errors during concurrent add+sample: {errors}")
+
+    def test_has_rlock(self):
+        """ArtifactDatabase should have an RLock for thread safety."""
+        db = ArtifactDatabase(DatabaseConfig())
+        self.assertIsInstance(db._lock, type(threading.RLock()))
 
 
 if __name__ == "__main__":
