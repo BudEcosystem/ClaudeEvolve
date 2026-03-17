@@ -121,9 +121,9 @@ def evaluate(candidate_path):
     combined_score = min(target_ratio, 1.0)  # Cap at 1.0
 
     return {
-        "combined_score": round(combined_score, 12),
-        "sum_radii": round(sum_radii, 12),
-        "target_ratio": round(target_ratio, 12),
+        "combined_score": round(combined_score, 16),
+        "sum_radii": round(sum_radii, 16),
+        "target_ratio": round(target_ratio, 16),
         "validity": 1.0,
         "eval_time": round(eval_time, 3),
         "n_circles": int(centers.shape[0]),
