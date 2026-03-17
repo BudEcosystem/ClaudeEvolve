@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from typing import Optional
 
 import click
@@ -146,6 +147,17 @@ def init(artifact, evaluator, mode, config_path, max_iterations, target_score, s
 
     # Persist evaluator path separately so submit can find it
     _save_evaluator_path(state_dir, os.path.abspath(evaluator))
+
+    # Generate and persist a unique run_id for cross-run memory tracking
+    run_id = uuid.uuid4().hex[:8]
+    metadata_path = os.path.join(state_dir, "metadata.json")
+    metadata = {}
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+    metadata["run_id"] = run_id
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f)
 
     # Run baseline evaluation for script mode
     baseline_score = None
@@ -361,6 +373,24 @@ def next(state_dir):
         iteration=db.last_iteration + 1,
         max_iterations=config.max_iterations,
     )
+
+    # Write iteration manifest for submit to consume
+    iteration = db.last_iteration + 1
+    manifest_metadata_path = os.path.join(state_dir, "metadata.json")
+    manifest_run_id = "unknown"
+    if os.path.exists(manifest_metadata_path):
+        with open(manifest_metadata_path, "r") as f:
+            manifest_run_id = json.load(f).get("run_id", "unknown")
+    manifest = {
+        "iteration": iteration,
+        "run_id": manifest_run_id,
+        "selected_strategy_id": selected_strategy.id if selected_strategy else "unknown",
+        "parent_artifact_id": parent.id if parent else None,
+        "parent_score": parent.metrics.get("combined_score", 0.0) if parent else 0.0,
+        "parent_island_id": getattr(parent, "island_id", 0) if parent else 0,
+    }
+    with open(os.path.join(state_dir, "current_iteration.json"), "w") as f:
+        json.dump(manifest, f)
 
     # Write to state dir
     sm.write_iteration_context(rendered)
@@ -856,6 +886,47 @@ def submit(candidate, state_dir, metrics):
             json.dump(archive.to_list(), f)
     except Exception:
         pass  # Non-critical — don't fail submit on stepping stone error
+
+    # Populate cross-run memory with outcome of this iteration
+    try:
+        manifest_path = os.path.join(state_dir, "current_iteration.json")
+        manifest = {}
+        if os.path.exists(manifest_path):
+            with open(manifest_path, "r") as f:
+                manifest = json.load(f)
+
+        memory_dir = os.path.join(state_dir, config.cross_run_memory.memory_dir)
+        from claude_evolve.core.memory import CrossRunMemory
+        memory = CrossRunMemory(
+            memory_dir=memory_dir,
+            max_learnings=config.cross_run_memory.max_learnings,
+            max_failed_approaches=config.cross_run_memory.max_failed_approaches,
+        )
+        memory.load()
+
+        score = validated_metrics.get("combined_score", 0.0)
+        parent_score = manifest.get("parent_score", 0.0)
+        strategy_name = manifest.get("selected_strategy_id", "unknown")
+        run_id = manifest.get("run_id", "unknown")
+        manifest_iteration = manifest.get("iteration", current_iteration)
+
+        if score <= parent_score:
+            memory.add_failed_approach(
+                description=f"Strategy '{strategy_name}' on iteration {manifest_iteration}",
+                score=score,
+                iteration=manifest_iteration,
+                run_id=run_id,
+            )
+        else:
+            memory.add_strategy(
+                name=strategy_name,
+                description=f"Improved from {parent_score:.4f} to {score:.4f}",
+                score=score,
+                run_id=run_id,
+            )
+        memory.save()
+    except Exception as e:
+        click.echo(f"Warning: Failed to populate cross-run memory: {e}", err=True)
 
     # Save state
     sm.save()

@@ -652,5 +652,170 @@ class TestCliEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(output["combined_score"], 0.7)
 
 
+class TestCliCrossRunMemory(unittest.TestCase):
+    """Tests for cross-run memory population in init/next/submit cycle."""
+
+    def setUp(self):
+        self.runner = CliRunner()
+        self.tmpdir = tempfile.mkdtemp()
+        self.artifact = os.path.join(self.tmpdir, "program.py")
+        with open(self.artifact, "w") as f:
+            f.write("def solve():\n    return 0\n")
+        self.evaluator = os.path.join(self.tmpdir, "evaluator.py")
+        with open(self.evaluator, "w") as f:
+            f.write(
+                'def evaluate(p):\n'
+                '    with open(p) as f: c = f.read()\n'
+                '    return {"combined_score": min(1.0, len(c) / 100.0)}\n'
+            )
+        self.state_dir = os.path.join(self.tmpdir, "state")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_init_creates_metadata_with_run_id(self):
+        """init should create metadata.json with a run_id."""
+        result = self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "10",
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        metadata_path = os.path.join(self.state_dir, "metadata.json")
+        self.assertTrue(os.path.exists(metadata_path),
+                        "metadata.json should be created by init")
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+        self.assertIn("run_id", metadata)
+        self.assertEqual(len(metadata["run_id"]), 8,
+                         "run_id should be an 8-char hex string")
+
+    def test_init_run_id_is_unique_across_runs(self):
+        """Each init should produce a different run_id."""
+        run_ids = []
+        for i in range(3):
+            sd = os.path.join(self.tmpdir, f"state_{i}")
+            self.runner.invoke(main, [
+                "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+                "--state-dir", sd, "--max-iterations", "5",
+            ])
+            metadata_path = os.path.join(sd, "metadata.json")
+            with open(metadata_path) as f:
+                run_ids.append(json.load(f)["run_id"])
+        self.assertEqual(len(set(run_ids)), 3,
+                         "Each init should produce a unique run_id")
+
+    def test_next_writes_iteration_manifest(self):
+        """next should write current_iteration.json with iteration metadata."""
+        # Init
+        self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "10",
+        ])
+        # Next
+        result = self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        manifest_path = os.path.join(self.state_dir, "current_iteration.json")
+        self.assertTrue(os.path.exists(manifest_path),
+                        "current_iteration.json should be written by next")
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        self.assertIn("iteration", manifest)
+        self.assertIn("run_id", manifest)
+        self.assertIn("selected_strategy_id", manifest)
+        self.assertIn("parent_artifact_id", manifest)
+        self.assertIn("parent_score", manifest)
+        self.assertIn("parent_island_id", manifest)
+
+    def test_submit_populates_memory_on_failure(self):
+        """When submit score <= parent, failed approach should be recorded."""
+        # Init + Next to create manifest
+        self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "10",
+        ])
+        self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        # Submit with a low score (worse than the parent)
+        candidate = os.path.join(self.tmpdir, "bad_candidate.py")
+        with open(candidate, "w") as f:
+            f.write("# tiny")
+        result = self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.01}',
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # Check that cross-run memory was populated
+        memory_dir = os.path.join(self.state_dir, "cross_run_memory")
+        failed_path = os.path.join(memory_dir, "failed_approaches.json")
+        self.assertTrue(os.path.exists(failed_path),
+                        "failed_approaches.json should exist after a failed submit")
+        with open(failed_path) as f:
+            failed = json.load(f)
+        self.assertGreater(len(failed), 0,
+                           "At least one failed approach should be recorded")
+
+    def test_submit_populates_memory_on_success(self):
+        """When submit score > parent, successful strategy should be recorded."""
+        # Init + Next to create manifest
+        self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "10",
+        ])
+        self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        # Submit with a high score (better than parent)
+        candidate = os.path.join(self.tmpdir, "good_candidate.py")
+        with open(candidate, "w") as f:
+            f.write("def solve():\n    return 42\n" + "# padding\n" * 20)
+        result = self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.99}',
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # Check that cross-run memory has a successful strategy
+        memory_dir = os.path.join(self.state_dir, "cross_run_memory")
+        strategies_path = os.path.join(memory_dir, "strategies.json")
+        self.assertTrue(os.path.exists(strategies_path),
+                        "strategies.json should exist after a successful submit")
+        with open(strategies_path) as f:
+            strategies = json.load(f)
+        self.assertGreater(len(strategies), 0,
+                           "At least one successful strategy should be recorded")
+
+    def test_submit_memory_includes_run_id(self):
+        """Memory entries should include the run_id from metadata."""
+        # Init + Next + Submit
+        self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "10",
+        ])
+        self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        candidate = os.path.join(self.tmpdir, "candidate.py")
+        with open(candidate, "w") as f:
+            f.write("x = 1")
+        self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.01}',
+        ])
+        # Read the run_id from metadata
+        with open(os.path.join(self.state_dir, "metadata.json")) as f:
+            run_id = json.load(f)["run_id"]
+        # Read the memory
+        memory_dir = os.path.join(self.state_dir, "cross_run_memory")
+        failed_path = os.path.join(memory_dir, "failed_approaches.json")
+        with open(failed_path) as f:
+            failed = json.load(f)
+        self.assertTrue(
+            any(fa.get("run_id") == run_id for fa in failed),
+            f"Failed approach should contain run_id={run_id}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
