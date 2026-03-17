@@ -910,5 +910,132 @@ class TestThreadSafety(unittest.TestCase):
         self.assertIsInstance(db._lock, type(threading.RLock()))
 
 
+# ---------------------------------------------------------------------------
+# Island-Artifact Sync Guard (Task 5)
+# ---------------------------------------------------------------------------
+class TestIslandArtifactSyncGuard(unittest.TestCase):
+    """Tests that remove() cleans island sets/feature maps and sampling
+    handles orphaned IDs gracefully."""
+
+    def test_remove_cleans_island_sets(self):
+        """After remove(), no island should contain the removed artifact's ID."""
+        config = DatabaseConfig(num_islands=2, population_size=100)
+        db = ArtifactDatabase(config)
+        a = Artifact(
+            id="to_remove",
+            content="test content",
+            artifact_type="python",
+            metrics={"combined_score": 0.5},
+        )
+        db.add(a)
+        aid = a.id
+        db.remove(aid)
+        for island_id, members in enumerate(db.islands):
+            self.assertNotIn(
+                aid, members, f"Orphaned ID {aid} still in island {island_id}"
+            )
+
+    def test_remove_cleans_feature_maps(self):
+        """After remove(), no island feature map should reference the removed ID."""
+        config = DatabaseConfig(num_islands=2, population_size=100)
+        db = ArtifactDatabase(config)
+        a = Artifact(
+            id="feat_remove",
+            content="feature test",
+            metrics={"combined_score": 0.7},
+            complexity=50.0,
+            diversity=0.5,
+        )
+        db.add(a)
+        db.remove("feat_remove")
+        for island_map in db.island_feature_maps:
+            for cell, aid in island_map.items():
+                self.assertNotEqual(
+                    aid,
+                    "feat_remove",
+                    f"Orphaned ID feat_remove in feature map cell {cell}",
+                )
+
+    def test_remove_cleans_archive(self):
+        """After remove(), archive should not contain the removed ID."""
+        config = DatabaseConfig(num_islands=1, population_size=100, archive_size=10)
+        db = ArtifactDatabase(config)
+        a = Artifact(
+            id="arch_rm",
+            content="archive removal test",
+            metrics={"combined_score": 0.9},
+        )
+        db.add(a)
+        db.remove("arch_rm")
+        self.assertNotIn("arch_rm", db.archive)
+
+    def test_remove_repairs_best_program_id(self):
+        """Removing the global best should update best_program_id."""
+        config = DatabaseConfig(num_islands=1, population_size=100)
+        db = ArtifactDatabase(config)
+        a1 = Artifact(id="a1", content="first", metrics={"combined_score": 0.5})
+        a2 = Artifact(id="a2", content="second", metrics={"combined_score": 0.9})
+        db.add(a1)
+        db.add(a2)
+        self.assertEqual(db.best_program_id, "a2")
+        db.remove("a2")
+        self.assertEqual(db.best_program_id, "a1")
+
+    def test_remove_repairs_island_best(self):
+        """Removing an island-best artifact nullifies that island's best."""
+        config = DatabaseConfig(num_islands=2, population_size=100)
+        db = ArtifactDatabase(config)
+        a = Artifact(id="ib", content="island best", metrics={"combined_score": 0.8})
+        db.add(a, target_island=0)
+        db.island_best_programs[0] = "ib"
+        db.remove("ib")
+        self.assertIsNone(db.island_best_programs[0])
+
+    def test_remove_nonexistent_returns_false(self):
+        """Removing an ID that doesn't exist returns False."""
+        db = ArtifactDatabase(DatabaseConfig())
+        self.assertFalse(db.remove("ghost_id"))
+
+    def test_remove_returns_true_on_success(self):
+        """Removing an existing artifact returns True."""
+        db = ArtifactDatabase(DatabaseConfig())
+        a = Artifact(id="present", content="x", metrics={"combined_score": 0.5})
+        db.add(a)
+        self.assertTrue(db.remove("present"))
+
+    def test_sampling_with_orphaned_ids_does_not_crash(self):
+        """If an island set has orphaned IDs, sampling should skip them."""
+        config = DatabaseConfig(num_islands=2, population_size=100)
+        db = ArtifactDatabase(config)
+        a = Artifact(
+            id="real",
+            content="test content for orphan test",
+            metrics={"combined_score": 0.5},
+        )
+        db.add(a)
+        real_island = a.metadata.get("island", 0)
+        db.islands[real_island].add("orphan_id_999")
+        parent, inspirations = db.sample()
+        self.assertIsNotNone(parent)
+
+    def test_weighted_sampling_cleans_orphaned_ids(self):
+        """_sample_from_island_weighted should remove orphaned IDs it encounters."""
+        config = DatabaseConfig(num_islands=2, population_size=100)
+        db = ArtifactDatabase(config)
+        a = Artifact(
+            id="valid",
+            content="valid content for weighted sampling",
+            metrics={"combined_score": 0.6},
+        )
+        db.add(a)
+        real_island = a.metadata.get("island", 0)
+        db.islands[real_island].add("ghost_1")
+        db.islands[real_island].add("ghost_2")
+        result = db._sample_from_island_weighted(real_island)
+        self.assertIsNotNone(result)
+        self.assertNotIn("ghost_1", db.islands[real_island])
+        self.assertNotIn("ghost_2", db.islands[real_island])
+
+
 if __name__ == "__main__":
     unittest.main()
