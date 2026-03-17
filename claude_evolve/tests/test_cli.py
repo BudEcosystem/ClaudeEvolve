@@ -817,5 +817,129 @@ class TestCliCrossRunMemory(unittest.TestCase):
         )
 
 
+class TestCliStrategyOutcome(unittest.TestCase):
+    """Tests for strategy outcome recording in submit."""
+
+    def setUp(self):
+        self.runner = CliRunner()
+        self.tmpdir = tempfile.mkdtemp()
+        self.artifact = os.path.join(self.tmpdir, "program.py")
+        with open(self.artifact, "w") as f:
+            f.write("def solve():\n    return 0\n")
+        self.evaluator = os.path.join(self.tmpdir, "evaluator.py")
+        with open(self.evaluator, "w") as f:
+            f.write(
+                'def evaluate(p):\n'
+                '    with open(p) as f: c = f.read()\n'
+                '    return {"combined_score": min(1.0, len(c) / 100.0)}\n'
+            )
+        self.state_dir = os.path.join(self.tmpdir, "state")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_submit_records_strategy_outcome(self):
+        """Strategy outcome should be recorded with score delta after submit."""
+        # Init + Next (creates strategies.json and current_iteration.json)
+        self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "10",
+        ])
+        self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        # Read the manifest to know which strategy was selected
+        with open(os.path.join(self.state_dir, "current_iteration.json")) as f:
+            manifest = json.load(f)
+        strategy_id = manifest["selected_strategy_id"]
+        parent_score = manifest["parent_score"]
+
+        # Read strategies before submit
+        strategies_path = os.path.join(self.state_dir, "strategies.json")
+        with open(strategies_path) as f:
+            strategies_before = json.load(f)
+        strategy_before = next(
+            (s for s in strategies_before if s["id"] == strategy_id), None
+        )
+        times_used_before = strategy_before["times_used"] if strategy_before else 0
+
+        # Submit with a known score
+        submit_score = 0.75
+        candidate = os.path.join(self.tmpdir, "candidate.py")
+        with open(candidate, "w") as f:
+            f.write("def solve():\n    return 42\n")
+        result = self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", json.dumps({"combined_score": submit_score}),
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+
+        # Read strategies after submit
+        with open(strategies_path) as f:
+            strategies_after = json.load(f)
+        strategy_after = next(
+            (s for s in strategies_after if s["id"] == strategy_id), None
+        )
+        self.assertIsNotNone(strategy_after,
+                             f"Strategy {strategy_id} should still exist")
+        self.assertEqual(strategy_after["times_used"], times_used_before + 1,
+                         "times_used should be incremented by 1")
+        # The score delta (score - parent_score) should be in score_history
+        expected_delta = submit_score - parent_score
+        self.assertIn(expected_delta, strategy_after["score_history"],
+                      f"score_history should contain delta {expected_delta}")
+
+    def test_submit_records_negative_delta_for_worse_score(self):
+        """A submit with score < parent should record a negative delta."""
+        self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "10",
+        ])
+        self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        with open(os.path.join(self.state_dir, "current_iteration.json")) as f:
+            manifest = json.load(f)
+        strategy_id = manifest["selected_strategy_id"]
+        parent_score = manifest["parent_score"]
+
+        # Submit with a score lower than parent
+        submit_score = 0.001
+        candidate = os.path.join(self.tmpdir, "bad_candidate.py")
+        with open(candidate, "w") as f:
+            f.write("# bad")
+        result = self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", json.dumps({"combined_score": submit_score}),
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+
+        strategies_path = os.path.join(self.state_dir, "strategies.json")
+        with open(strategies_path) as f:
+            strategies = json.load(f)
+        strategy = next((s for s in strategies if s["id"] == strategy_id), None)
+        self.assertIsNotNone(strategy)
+        expected_delta = submit_score - parent_score
+        self.assertIn(expected_delta, strategy["score_history"])
+        # Delta should be negative (or at most zero)
+        self.assertLessEqual(expected_delta, 0.0)
+
+    def test_submit_without_manifest_still_succeeds(self):
+        """Submit should not crash if current_iteration.json is missing."""
+        self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "10",
+        ])
+        # Skip next (no manifest written) -- submit directly
+        candidate = os.path.join(self.tmpdir, "candidate.py")
+        with open(candidate, "w") as f:
+            f.write("x = 1")
+        result = self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.5}',
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -928,6 +928,26 @@ def submit(candidate, state_dir, metrics):
     except Exception as e:
         click.echo(f"Warning: Failed to populate cross-run memory: {e}", err=True)
 
+    # Record strategy outcome so the strategy manager can learn from results
+    try:
+        manifest_path = os.path.join(state_dir, "current_iteration.json")
+        if os.path.exists(manifest_path):
+            with open(manifest_path, "r") as f:
+                manifest = json.load(f)
+            strategy_id = manifest.get("selected_strategy_id")
+            parent_score = manifest.get("parent_score", 0.0)
+            if strategy_id:
+                strategies_path = os.path.join(state_dir, "strategies.json")
+                from claude_evolve.core.strategy import StrategyManager
+                strategy_mgr = StrategyManager(strategies_path)
+                strategy_mgr.load()
+                score = validated_metrics.get("combined_score", 0.0)
+                score_delta = score - parent_score
+                strategy_mgr.record_outcome(strategy_id, score_delta)
+                strategy_mgr.save()
+    except Exception as e:
+        click.echo(f"Warning: Failed to record strategy outcome: {e}", err=True)
+
     # Save state
     sm.save()
 
