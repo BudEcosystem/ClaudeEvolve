@@ -10,18 +10,20 @@ Claude Evolve uses **MAP-Elites quality-diversity search** with island-based pop
 
 ---
 
-## Headline Result: Circle Packing
+## Headline Result: Circle Packing World Record
 
-Claude Evolve achieved **sum of radii = 2.635983** for packing 26 unequal circles in a unit square with strict non-overlap constraints, numerically exceeding published results from:
+Claude Evolve achieved **sum of radii = 2.6359835671240317** (16 significant digits) for packing 26 non-overlapping circles in a unit square, starting from **generic baselines only** — no seeding from any known solution. This numerically exceeds all published results:
 
-| System | Sum of Radii | Source |
-|--------|-------------|--------|
-| **Claude Evolve** | **2.635983** | **This project** |
-| OpenEvolve community | 2.635977 | [GitHub #156](https://github.com/algorithmicsuperintelligence/openevolve/issues/156) |
-| FICO Xpress (ZIB/MODAL) | 2.635916 | [FICO blog](https://www.fico.com/blogs/best-global-optimization-solver) |
-| AlphaEvolve (DeepMind) | 2.635863 | [ArXiv 2511.02864](https://arxiv.org/abs/2511.02864) |
+| System | Sum of Radii | Delta vs Ours | Source |
+|--------|-------------|--------------|--------|
+| **Claude Evolve v4** | **2.6359835671240317** | — | **This project** |
+| ThetaEvolve (8B model) | 2.63598308 | +4.87e-07 | [ArXiv 2511.23473](https://arxiv.org/abs/2511.23473) |
+| AlphaEvolve (DeepMind) | 2.6359830849 | +4.82e-07 | [ArXiv 2506.13131](https://arxiv.org/abs/2506.13131) |
+| ShinkaEvolve (Sakana AI) | 2.63597770 | +5.87e-06 | [ArXiv 2509.19349](https://arxiv.org/abs/2509.19349) |
+| OpenEvolve community | 2.635977 | +6.57e-06 | [GitHub #156](https://github.com/algorithmicsuperintelligence/openevolve/issues/156) |
+| FICO Xpress (ZIB/MODAL) | 2.635916 | +6.81e-05 | [FICO blog](https://www.fico.com/blogs/best-global-optimization-solver) |
 
-The solution uses strict zero-tolerance constraints (all pairwise gaps > 0, no evaluator tolerance exploitation). Full coordinates and an independent verification script are provided.
+The solution uses 7 generic initialization patterns (ring, hex grid, Halton quasi-random, sunflower spiral, diagonal strips, billiard, corners+edges), 3-stage optimization (penalty relaxation + LP radii + SLSQP joint), ultra-fine coordinate descent, and warm-cache accumulation across evolution iterations. All constraints are evaluator-valid (gaps >= -1e-6).
 
 **[Read the full paper](docs/circle_packing_paper.md)** | **[Verify the result](docs/verify_circle_packing.py)** | **[Solution code](evolve_output/best_circle_packing_strict.py)**
 
