@@ -403,6 +403,20 @@ class ContextBuilder:
             lines.append(f"```\n{snippet}\n```")
             lines.append("")
 
+        # Recent failures for reflexion
+        failures_text = metadata.get("failures_text")
+        if failures_text:
+            lines.append(failures_text)
+            lines.append("")
+
+        # Evaluator source code (how candidates are scored)
+        evaluator_source = metadata.get("evaluator_source")
+        if evaluator_source:
+            lines.append("## Evaluator Source (How Candidates Are Scored)")
+            lines.append("")
+            lines.append(f"```python\n{evaluator_source}\n```")
+            lines.append("")
+
         # Embed the full prompt
         lines.append("## Evolution Prompt")
         lines.append("")
