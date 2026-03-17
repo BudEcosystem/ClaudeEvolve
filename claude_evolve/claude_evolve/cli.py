@@ -343,6 +343,33 @@ def next(state_dir):
         except Exception:
             pass
 
+    # Recent failures for reflexion (avoid repeating past mistakes)
+    failures_text = None
+    failures_path = os.path.join(state_dir, "recent_failures.json")
+    if os.path.exists(failures_path):
+        try:
+            with open(failures_path, "r", encoding="utf-8") as f:
+                failures = json.load(f)
+            if failures:
+                lines = ["## Recent Failures (Avoid These)"]
+                for f_entry in failures:
+                    err = f_entry.get("error") or f"score dropped to {f_entry.get('score', '?')}"
+                    lines.append(f"- Approach: {f_entry.get('approach', '?')}. Result: {err}")
+                failures_text = "\n".join(lines)
+        except Exception:
+            pass
+
+    # Load evaluator source so the LLM can see how candidates are scored
+    evaluator_source = None
+    evaluator_path = _find_evaluator_path(state_dir, config)
+    if evaluator_path and os.path.exists(evaluator_path):
+        try:
+            with open(evaluator_path, "r", encoding="utf-8") as f:
+                evaluator_lines = f.readlines()[:200]
+            evaluator_source = "".join(evaluator_lines)
+        except Exception:
+            pass
+
     ctx_builder = ContextBuilder(config.prompt)
     ctx = ctx_builder.build_context(
         parent=parent,
@@ -361,6 +388,8 @@ def next(state_dir):
         strategy_text=strategy_text,
         warm_cache_text=warm_cache_text if warm_cache_text else None,
         stepping_stones_text=stepping_stones_text if stepping_stones_text else None,
+        failures_text=failures_text if failures_text else None,
+        evaluator_source=evaluator_source if evaluator_source else None,
     )
 
     # Render iteration context
@@ -789,7 +818,34 @@ def submit(candidate, state_dir, metrics):
     with open(candidate, "r") as f:
         candidate_content = f.read()
 
+    # Pre-evaluation novelty gate — reject near-duplicates before
+    # spending evaluator resources.  Skip when the archive is too
+    # small (< 3 members) to make a meaningful comparison.
+    min_novelty = config.selection.novelty_gate_min_novelty
+    top_artifacts = db.get_top_programs(n=10)
+    if len(top_artifacts) >= 3:
+        from claude_evolve.core.novelty import compute_novelty
+
+        for archive_art in top_artifacts:
+            novelty = compute_novelty(
+                candidate_content,
+                archive_art.content,
+                artifact_type=config.artifact_type,
+            )
+            if novelty < min_novelty:
+                click.echo(json.dumps({
+                    "rejected": True,
+                    "reason": (
+                        f"Candidate too similar to existing solution "
+                        f"{archive_art.id} (novelty: {novelty:.3f}, "
+                        f"threshold: {min_novelty}). "
+                        f"Try a more novel approach."
+                    ),
+                }))
+                return
+
     # Evaluate
+    raw_metrics = None  # Preserved for failure reflexion (may contain non-numeric fields)
     if metrics is not None:
         # Critic mode: parse pre-computed metrics
         try:
@@ -943,6 +999,43 @@ def submit(candidate, state_dir, metrics):
                 strategy_mgr.save()
     except Exception as e:
         click.echo(f"Warning: Failed to record strategy outcome: {e}", err=True)
+
+    # Capture failure for reflexion (circular buffer, max 5)
+    try:
+        manifest_path = os.path.join(state_dir, "current_iteration.json")
+        manifest = {}
+        if os.path.exists(manifest_path):
+            with open(manifest_path, "r") as f:
+                manifest = json.load(f)
+
+        score = validated_metrics.get("combined_score", 0.0)
+        parent_score = manifest.get("parent_score", 0.0)
+        strategy_name = manifest.get("selected_strategy_id", "unknown")
+        manifest_iteration = manifest.get("iteration", current_iteration)
+
+        # Check both validated and raw metrics for error (raw_metrics retains
+        # non-numeric fields like error strings that evaluate_with_metrics strips)
+        error_value = validated_metrics.get("error")
+        if error_value is None and raw_metrics is not None:
+            error_value = raw_metrics.get("error")
+        if score < parent_score * 0.95 or error_value:
+            failures_path = os.path.join(state_dir, "recent_failures.json")
+            failures = []
+            if os.path.exists(failures_path):
+                with open(failures_path, "r", encoding="utf-8") as f:
+                    failures = json.load(f)
+            failures.append({
+                "approach": strategy_name,
+                "error": error_value,
+                "score": score,
+                "parent_score": parent_score,
+                "iteration": manifest_iteration,
+            })
+            failures = failures[-5:]  # Circular buffer: keep only last 5
+            with open(failures_path, "w", encoding="utf-8") as f:
+                json.dump(failures, f)
+    except Exception as e:
+        click.echo(f"Warning: Failed to capture failure for reflexion: {e}", err=True)
 
     # Save state
     sm.save()

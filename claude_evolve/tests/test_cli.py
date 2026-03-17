@@ -490,11 +490,43 @@ class TestCliMultiSubmitCycle(unittest.TestCase):
             self.assertEqual(next_result.exit_code, 0,
                              msg=f"next failed at iteration {i}: {next_result.output}")
 
-            # Create a candidate
+            # Create a candidate — each must be sufficiently distinct to
+            # pass the pre-evaluation novelty gate (which rejects
+            # near-duplicates once the archive has >= 3 members).
             candidate = os.path.join(self.tmpdir, f"candidate_{i}.py")
-            content = f"def solve():\n    return {i + 1}\n" + ("# padding\n" * (i + 1) * 5)
+            distinct_code = [
+                (
+                    "import math\n"
+                    "class CircleSolver:\n"
+                    "    def __init__(self, radius):\n"
+                    "        self.radius = radius\n"
+                    "    def area(self):\n"
+                    "        return math.pi * self.radius ** 2\n"
+                    "    def circumference(self):\n"
+                    "        return 2 * math.pi * self.radius\n"
+                ),
+                (
+                    "import itertools\n"
+                    "def permutation_search(elements, target):\n"
+                    "    for perm in itertools.permutations(elements):\n"
+                    "        if sum(perm[:3]) == target:\n"
+                    "            return perm\n"
+                    "    return None\n"
+                    "result = permutation_search([10, 20, 30, 40, 50], 60)\n"
+                ),
+                (
+                    "from collections import defaultdict\n"
+                    "def build_graph(edges):\n"
+                    "    graph = defaultdict(list)\n"
+                    "    for u, v in edges:\n"
+                    "        graph[u].append(v)\n"
+                    "        graph[v].append(u)\n"
+                    "    return dict(graph)\n"
+                    "adjacency = build_graph([(1,2),(2,3),(3,4)])\n"
+                ),
+            ]
             with open(candidate, "w") as f:
-                f.write(content)
+                f.write(distinct_code[i])
 
             # Submit
             submit_result = self.runner.invoke(main, [
@@ -1071,6 +1103,276 @@ class TestCliResearchTrigger(unittest.TestCase):
         # periodic_interval=1 means every iteration should trigger
         self.assertIn("Test Approach XYZ", result.output,
                       "Research findings should be included for periodic trigger")
+
+
+class TestCliFailureReflexion(unittest.TestCase):
+    """Tests for failure reflexion capture and injection (Task 10)."""
+
+    def setUp(self):
+        self.runner = CliRunner()
+        self.tmpdir = tempfile.mkdtemp()
+        self.artifact = os.path.join(self.tmpdir, "program.py")
+        with open(self.artifact, "w") as f:
+            f.write("def solve():\n    return 0\n")
+        self.evaluator = os.path.join(self.tmpdir, "evaluator.py")
+        with open(self.evaluator, "w") as f:
+            f.write(
+                'def evaluate(p):\n'
+                '    with open(p) as f: c = f.read()\n'
+                '    return {"combined_score": min(1.0, len(c) / 100.0)}\n'
+            )
+        self.state_dir = os.path.join(self.tmpdir, "state")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _init_and_next(self):
+        """Helper: init + next to create manifest."""
+        self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "20",
+        ])
+        self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+
+    def test_failure_captured_in_recent_failures(self):
+        """When eval score < parent * 0.95, failure should be stored."""
+        self._init_and_next()
+        # Submit with a very low score (much less than parent * 0.95)
+        candidate = os.path.join(self.tmpdir, "bad.py")
+        with open(candidate, "w") as f:
+            f.write("# bad")
+        result = self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.01}',
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+
+        failures_path = os.path.join(self.state_dir, "recent_failures.json")
+        self.assertTrue(os.path.exists(failures_path),
+                        "recent_failures.json should be created on failure")
+        with open(failures_path) as f:
+            failures = json.load(f)
+        self.assertGreater(len(failures), 0,
+                           "At least one failure should be captured")
+        self.assertIn("approach", failures[0])
+        self.assertIn("score", failures[0])
+        self.assertIn("parent_score", failures[0])
+
+    def test_recent_failures_circular_buffer(self):
+        """Recent failures should keep only last 5 entries."""
+        self._init_and_next()
+        # Pre-populate failures with 4 entries
+        failures_path = os.path.join(self.state_dir, "recent_failures.json")
+        seed_failures = [
+            {"approach": f"strat-{i}", "error": None,
+             "score": 0.1 * i, "parent_score": 0.8, "iteration": i}
+            for i in range(4)
+        ]
+        with open(failures_path, "w") as f:
+            json.dump(seed_failures, f)
+
+        # Submit 3 more failures to exceed buffer size of 5
+        for i in range(3):
+            # Need to call next to refresh the manifest each time
+            self.runner.invoke(main, ["next", "--state-dir", self.state_dir])
+            candidate = os.path.join(self.tmpdir, f"bad_{i}.py")
+            with open(candidate, "w") as f:
+                f.write(f"# fail {i}")
+            self.runner.invoke(main, [
+                "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+                "--metrics", json.dumps({"combined_score": 0.001}),
+            ])
+
+        with open(failures_path) as f:
+            failures = json.load(f)
+        self.assertLessEqual(len(failures), 5,
+                             "Circular buffer should keep at most 5 entries")
+        self.assertGreater(len(failures), 0)
+
+    def test_failures_injected_into_next_context(self):
+        """Failures text should appear in the next iteration context."""
+        self._init_and_next()
+
+        # Submit a failure so recent_failures.json gets populated
+        candidate = os.path.join(self.tmpdir, "bad.py")
+        with open(candidate, "w") as f:
+            f.write("# bad")
+        self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.001}',
+        ])
+
+        # Now call next -- failures should appear in the context output
+        result = self.runner.invoke(main, [
+            "next", "--state-dir", self.state_dir,
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Recent Failures", result.output,
+                       "Failure reflexion should be injected into next context")
+
+    def test_no_failure_when_score_above_threshold(self):
+        """If score >= parent * 0.95, no failure should be captured."""
+        self._init_and_next()
+        candidate = os.path.join(self.tmpdir, "ok.py")
+        with open(candidate, "w") as f:
+            f.write("def solve():\n    return 42\n" + "# pad\n" * 20)
+        self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.99}',
+        ])
+        failures_path = os.path.join(self.state_dir, "recent_failures.json")
+        if os.path.exists(failures_path):
+            with open(failures_path) as f:
+                failures = json.load(f)
+            self.assertEqual(len(failures), 0,
+                             "No failure should be captured for a good score")
+        # If the file doesn't exist, that's also correct
+
+    def test_failure_captured_with_error_field(self):
+        """If metrics contain an 'error' field, failure should be captured."""
+        self._init_and_next()
+        candidate = os.path.join(self.tmpdir, "err.py")
+        with open(candidate, "w") as f:
+            f.write("x = 1")
+        self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.99, "error": "SyntaxError in test"}',
+        ])
+        failures_path = os.path.join(self.state_dir, "recent_failures.json")
+        self.assertTrue(os.path.exists(failures_path))
+        with open(failures_path) as f:
+            failures = json.load(f)
+        self.assertGreater(len(failures), 0)
+        self.assertEqual(failures[-1]["error"], "SyntaxError in test")
+
+
+class TestCliNoveltyGate(unittest.TestCase):
+    """Tests for the pre-evaluation novelty gate in submit."""
+
+    def setUp(self):
+        self.runner = CliRunner()
+        self.tmpdir = tempfile.mkdtemp()
+        self.artifact = os.path.join(self.tmpdir, "program.py")
+        with open(self.artifact, "w") as f:
+            f.write("def solve():\n    return 42\n")
+        self.evaluator = os.path.join(self.tmpdir, "evaluator.py")
+        with open(self.evaluator, "w") as f:
+            f.write(
+                'import json, sys\n'
+                'def evaluate(p):\n'
+                '    with open(p) as f: c = f.read()\n'
+                '    return {"combined_score": min(1.0, len(c) / 100.0)}\n'
+                'if __name__ == "__main__":\n'
+                '    import json, sys\n'
+                '    result = evaluate(sys.argv[1])\n'
+                '    print(json.dumps(result))\n'
+            )
+        self.state_dir = os.path.join(self.tmpdir, "state")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _init_and_populate(self, num_seeds=4):
+        """Init the run and seed several artifacts to pass the >=3 threshold."""
+        result = self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "100",
+        ])
+        assert result.exit_code == 0, result.output
+
+        # Seed additional distinct artifacts so archive has >= 3 members
+        for i in range(num_seeds):
+            seed_file = os.path.join(self.tmpdir, f"seed_{i}.py")
+            # Each seed is meaningfully different content
+            with open(seed_file, "w") as f:
+                f.write(
+                    f"import module_{i}\n"
+                    f"def unique_function_{i}(data):\n"
+                    f"    # Approach {i}: completely different algorithm\n"
+                    f"    result = module_{i}.process(data, strategy={i})\n"
+                    f"    return result * {i + 1}\n"
+                )
+            self.runner.invoke(main, [
+                "seed", "--artifact", seed_file, "--state-dir", self.state_dir,
+                "--metrics", json.dumps({"combined_score": 0.3 + i * 0.1}),
+            ])
+
+    def test_novelty_gate_rejects_similar_candidate(self):
+        """Candidate nearly identical to an archive member should be rejected."""
+        self._init_and_populate()
+
+        # Create a candidate that is nearly identical to the seed artifact
+        candidate = os.path.join(self.tmpdir, "similar_candidate.py")
+        with open(candidate, "w") as f:
+            f.write("def solve():\n    return 42\n")
+
+        result = self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.6}',
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        output = json.loads(result.output)
+        self.assertTrue(output.get("rejected", False),
+                        "Near-duplicate candidate should be rejected")
+        self.assertIn("too similar", output.get("reason", ""))
+
+    def test_novelty_gate_passes_novel_candidate(self):
+        """A genuinely novel candidate should pass through to evaluation."""
+        self._init_and_populate()
+
+        # Create a candidate that is clearly different from all seeds
+        candidate = os.path.join(self.tmpdir, "novel_candidate.py")
+        with open(candidate, "w") as f:
+            f.write(
+                "import numpy as np\n"
+                "from scipy.optimize import differential_evolution\n\n"
+                "class EvolutionaryOptimizer:\n"
+                "    def __init__(self, bounds, population_size=50):\n"
+                "        self.bounds = bounds\n"
+                "        self.population_size = population_size\n\n"
+                "    def optimize(self, objective_func):\n"
+                "        result = differential_evolution(\n"
+                "            objective_func, self.bounds,\n"
+                "            maxiter=1000, seed=42,\n"
+                "            popsize=self.population_size,\n"
+                "        )\n"
+                "        return result.x, result.fun\n"
+            )
+        result = self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.9}',
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        output = json.loads(result.output)
+        self.assertFalse(output.get("rejected", False),
+                         "Novel candidate should not be rejected")
+        self.assertIn("combined_score", output)
+
+    def test_novelty_gate_skips_with_small_archive(self):
+        """Gate should skip when archive has < 3 members."""
+        # Init but do NOT add extra seeds -- only the initial seed exists
+        result = self.runner.invoke(main, [
+            "init", "--artifact", self.artifact, "--evaluator", self.evaluator,
+            "--state-dir", self.state_dir, "--max-iterations", "100",
+        ])
+        assert result.exit_code == 0, result.output
+
+        # Submit a near-duplicate -- should pass because archive < 3
+        candidate = os.path.join(self.tmpdir, "dup_candidate.py")
+        with open(candidate, "w") as f:
+            f.write("def solve():\n    return 42\n")
+        result = self.runner.invoke(main, [
+            "submit", "--candidate", candidate, "--state-dir", self.state_dir,
+            "--metrics", '{"combined_score": 0.5}',
+        ])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        output = json.loads(result.output)
+        # Should NOT be rejected -- archive too small for gate
+        self.assertFalse(output.get("rejected", False),
+                         "Gate should skip when archive < 3")
+        self.assertIn("combined_score", output)
 
 
 if __name__ == "__main__":
