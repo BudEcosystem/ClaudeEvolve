@@ -1156,5 +1156,241 @@ class TestContextBuilderPairwiseComparison(unittest.TestCase):
         self.assertIn("x = 1", snippet_section)
 
 
+class TestContextBuilderAscendingSort(unittest.TestCase):
+    """Test ascending score sort and score annotation in top programs (Task 11)."""
+
+    def setUp(self):
+        self.builder = ContextBuilder(PromptConfig())
+        self.parent = Artifact(
+            id="p1",
+            content="def solve(): return 42",
+            metrics={"combined_score": 0.6},
+        )
+
+    def test_top_programs_sorted_ascending_in_context(self):
+        """Top programs should be rendered worst-first, best-last in context."""
+        top = [
+            {
+                "id": f"top-{i}",
+                "code": f"def solve(): return {i}",
+                "metrics": {"combined_score": score},
+            }
+            for i, score in [(1, 0.9), (2, 0.7), (3, 0.5)]
+        ]
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=5,
+            best_score=0.9,
+            top_programs=top,
+            inspirations=[],
+            previous_programs=[],
+        )
+        prompt = ctx["prompt"]
+        # Find positions of the three scores in the prompt
+        pos_05 = prompt.find("0.5000")
+        pos_07 = prompt.find("0.7000")
+        pos_09 = prompt.find("0.9000")
+        # All three scores should appear
+        self.assertNotEqual(pos_05, -1, "Score 0.5000 should appear in prompt")
+        self.assertNotEqual(pos_07, -1, "Score 0.7000 should appear in prompt")
+        self.assertNotEqual(pos_09, -1, "Score 0.9000 should appear in prompt")
+        # Ascending order: worst (0.5) first, best (0.9) last
+        self.assertLess(pos_05, pos_07,
+                        "Score 0.5 should appear before 0.7 (ascending)")
+        self.assertLess(pos_07, pos_09,
+                        "Score 0.7 should appear before 0.9 (ascending)")
+
+    def test_score_annotation_prefix_on_programs(self):
+        """Each top program should have a '# Score: X.XXXXXX' prefix."""
+        top = [
+            {
+                "id": "top-1",
+                "code": "def solve(): return 100",
+                "metrics": {"combined_score": 0.85},
+            },
+        ]
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=3,
+            best_score=0.85,
+            top_programs=top,
+            inspirations=[],
+            previous_programs=[],
+        )
+        prompt = ctx["prompt"]
+        self.assertIn("# Score: 0.850000", prompt,
+                       "Score annotation with 6 decimal places should be present")
+
+    def test_ascending_sort_with_single_program(self):
+        """Ascending sort should work fine with a single top program."""
+        top = [
+            {
+                "id": "top-1",
+                "code": "def solve(): return 1",
+                "metrics": {"combined_score": 0.75},
+            },
+        ]
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=2,
+            best_score=0.75,
+            top_programs=top,
+            inspirations=[],
+            previous_programs=[],
+        )
+        prompt = ctx["prompt"]
+        self.assertIn("0.7500", prompt)
+        self.assertIn("# Score: 0.750000", prompt)
+
+    def test_ascending_sort_with_empty_top_programs(self):
+        """Ascending sort should handle empty top programs gracefully."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=1,
+            best_score=0.6,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+        )
+        # Should not crash, just no top programs section content
+        self.assertIsInstance(ctx["prompt"], str)
+
+
+class TestContextBuilderEvaluatorSource(unittest.TestCase):
+    """Test evaluator source code inclusion in context (Task 11)."""
+
+    def setUp(self):
+        self.builder = ContextBuilder(PromptConfig())
+        self.parent = Artifact(
+            id="p1",
+            content="def solve(): return 42",
+            metrics={"combined_score": 0.6},
+        )
+
+    def test_evaluator_source_included_in_context(self):
+        """When evaluator_source is provided, it should appear in the context."""
+        evaluator_code = "def evaluate(path):\n    return {'score': 1.0}\n"
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=3,
+            best_score=0.6,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            evaluator_source=evaluator_code,
+        )
+        md = self.builder.render_iteration_context(
+            ctx, iteration=3, max_iterations=30
+        )
+        self.assertIn("Evaluator Source", md)
+        self.assertIn("def evaluate", md)
+
+    def test_evaluator_source_absent_when_not_provided(self):
+        """Without evaluator_source, no evaluator section appears."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=3,
+            best_score=0.6,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+        )
+        md = self.builder.render_iteration_context(
+            ctx, iteration=3, max_iterations=30
+        )
+        self.assertNotIn("Evaluator Source", md)
+
+    def test_evaluator_source_in_metadata(self):
+        """Evaluator source should be stored in context metadata."""
+        evaluator_code = "def evaluate(x): return x"
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=1,
+            best_score=0.5,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            evaluator_source=evaluator_code,
+        )
+        self.assertEqual(ctx["metadata"]["evaluator_source"], evaluator_code)
+
+    def test_evaluator_source_rendered_in_python_code_block(self):
+        """Evaluator source should be rendered in a python code block."""
+        evaluator_code = "import math\ndef evaluate(p): return math.pi"
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=1,
+            best_score=0.5,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            evaluator_source=evaluator_code,
+        )
+        md = self.builder.render_iteration_context(
+            ctx, iteration=1, max_iterations=30
+        )
+        self.assertIn("```python", md)
+        self.assertIn("import math", md)
+
+
+class TestContextBuilderFailuresText(unittest.TestCase):
+    """Test recent failures reflexion rendering in context (Task 10)."""
+
+    def setUp(self):
+        self.builder = ContextBuilder(PromptConfig())
+        self.parent = Artifact(
+            id="p1",
+            content="def solve(): return 42",
+            metrics={"combined_score": 0.6},
+        )
+
+    def test_failures_text_included_in_context(self):
+        """When failures_text is provided, it should appear in the rendered context."""
+        failures = "## Recent Failures (Avoid These)\n- Approach: foo. Result: score dropped to 0.1"
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=5,
+            best_score=0.6,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            failures_text=failures,
+        )
+        md = self.builder.render_iteration_context(
+            ctx, iteration=5, max_iterations=30
+        )
+        self.assertIn("Recent Failures", md)
+        self.assertIn("foo", md)
+
+    def test_failures_text_absent_when_not_provided(self):
+        """Without failures_text, no failures section appears."""
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=5,
+            best_score=0.6,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+        )
+        md = self.builder.render_iteration_context(
+            ctx, iteration=5, max_iterations=30
+        )
+        self.assertNotIn("Recent Failures", md)
+
+    def test_failures_text_in_metadata(self):
+        """Failures text should be stored in context metadata."""
+        failures = "## Recent Failures\n- Something failed"
+        ctx = self.builder.build_context(
+            parent=self.parent,
+            iteration=2,
+            best_score=0.5,
+            top_programs=[],
+            inspirations=[],
+            previous_programs=[],
+            failures_text=failures,
+        )
+        self.assertEqual(ctx["metadata"]["failures_text"], failures)
+
+
 if __name__ == "__main__":
     unittest.main()

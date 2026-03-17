@@ -664,11 +664,15 @@ class ContextBuilder:
                 + "\n\n"
             )
 
-        # --- Top programs ---
+        # --- Top programs (ascending order: worst first, best last per OPRO) ---
         top_programs_str = ""
         selected_top = top_programs[
             : min(self.config.num_top_programs, len(top_programs))
         ]
+        # Reverse to ascending order so the best program appears last
+        # (closest to the generation prompt). This follows the OPRO finding
+        # that LLMs attend more to later examples.
+        selected_top = list(reversed(selected_top))
 
         for i, program in enumerate(selected_top):
             use_changes = self.config.programs_as_changes_description
@@ -685,6 +689,11 @@ class ContextBuilder:
             score = get_fitness_score(
                 program.get("metrics", {}), feature_dimensions or []
             )
+
+            # Prefix program snippet with score annotation so the LLM
+            # can immediately see how each program scored
+            score_prefix = f"# Score: {score:.6f}\n"
+            program_code = score_prefix + program_code
 
             key_features = program.get("key_features", [])
             if not key_features:
